@@ -1,0 +1,198 @@
+name: NXFormat tests and conformance
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-writer:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # On Windows the conformance scripts build with MSVC, not MinGW.
+      CXX: ${{ matrix.os == 'windows-latest' && 'cl' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Install real Zstandard decoder runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libzstd1
+      - name: Install macOS Zstandard decoder runtime
+        if: runner.os == 'macOS'
+        run: brew list zstd || brew install zstd
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path packer/Cargo.toml -- --check
+      - name: Run Rust library tests
+        run: cargo test --locked --manifest-path packer/Cargo.toml
+      - name: Run dependency-free portable SHA tests
+        run: cargo test --locked --no-default-features --manifest-path packer/Cargo.toml
+      - name: Run Rust static checks
+        run: cargo clippy --all-targets --locked --manifest-path packer/Cargo.toml -- -D warnings
+      - name: Independently validate Rust writer output in Python and C++17
+        run: python tests/conformance/test_rust_writer.py
+      - name: Independently validate native conversion and original content
+        run: python tests/conformance/test_native_conversion.py
+      - name: Independently validate native additions from existing NX
+        run: python tests/conformance/test_native_add.py
+      - name: Independently validate complete Switch 1 multi-Program views
+        run: python tests/conformance/test_switch1_review.py
+      - name: Validate extracted-tree conversion and CLI workflows
+        run: |
+          python tests/conformance/test_extracted_tree.py
+          python tests/conformance/test_tree_cli.py
+      - name: Independently validate transactional repack output in Python and C++17
+        run: python tests/conformance/test_rust_repack.py
+      - name: Validate persistent runtime reader, shared LRU and asynchronous prefetch
+        run: python tests/conformance/test_session.py
+      - name: Validate native and portable block SHA-256
+        run: python tests/conformance/test_native_sha.py
+      - name: Validate persistent runtime under address/undefined sanitizers
+        if: runner.os == 'Linux'
+        run: python tests/conformance/test_session.py --sanitize address,undefined
+
+  fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Install real Zstandard decoder runtime
+        run: sudo apt-get update && sudo apt-get install -y libzstd1
+      - name: Regenerate deterministic fixtures
+        run: python tests/conformance/build_fixtures.py
+      - name: Validate documentation paths and fixture index
+        run: python tests/conformance/check_phase0.py
+      - name: Validate fixture layouts and contents
+        run: python tests/conformance/validate_fixtures.py
+      - name: Verify binary fixture reproducibility
+        run: python tests/conformance/check_reproducible.py
+      - name: Verify generated reader header
+        run: python reader/generate_header.py --check
+      - name: Compile and exercise the C++17 reader
+        run: python tests/conformance/test_reader.py
+      - name: Build the C++17 reader with CMake and run its smoke test
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          cmake --build build --config Release --target nx_reader_cxx17_smoke
+          ctest --test-dir build -C Release --output-on-failure
+      - name: Exercise the reader under AddressSanitizer and UndefinedBehaviorSanitizer
+        run: python tests/conformance/test_reader_sanitizers.py
+      - name: Ensure generated fixtures are committed
+        shell: bash
+        run: |
+          for file in tests/fixtures/*.nx tests/fixtures/fixture_index.json; do
+            git ls-files --error-unmatch "$file" >/dev/null
+          done
+          git diff --exit-code -- tests/fixtures
+      - name: Check patch whitespace
+        run: git diff --check
+
+  rust-msrv:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80.0
+      - name: Check all targets with minimum supported Rust
+        run: cargo check --locked --all-targets --manifest-path packer/Cargo.toml
+      - name: Test both SHA backends with minimum supported Rust
+        run: |
+          cargo test --locked --manifest-path packer/Cargo.toml
+          cargo test --locked --no-default-features --manifest-path packer/Cargo.toml
+
+  c-api:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Check formatting
+        run: cargo fmt --manifest-path ffi/Cargo.toml -- --check
+      - name: Static checks
+        run: cargo clippy --all-targets --locked --manifest-path ffi/Cargo.toml -- -D warnings
+      - name: Test the C entry points
+        run: cargo test --locked --manifest-path ffi/Cargo.toml
+      - name: Build the libraries
+        run: cargo build --release --locked --manifest-path ffi/Cargo.toml
+      - name: Link a C program against the shared and the static library
+        run: |
+          python tools/test_c_api.py
+          python tools/test_c_api.py --static
+      - name: Build and test a packaged CMake consumer
+        shell: bash
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("ffi/Cargo.toml", "rb"))["package"]["version"])')
+          case "$RUNNER_OS" in
+            Windows) platform=windows-x64 ;;
+            Linux) platform=linux-x64 ;;
+            macOS) platform=macos-native ;;
+            *) echo "Unsupported runner: $RUNNER_OS"; exit 1 ;;
+          esac
+          python tools/package_release.py --platform "$platform" --version "$version" --lib-dir ffi/target/release --out build/ci-package
+          python tools/test_release_package.py --archive-dir build/ci-package
+
+  app:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --manifest-path app/Cargo.toml -- --check
+      - name: Static checks
+        run: cargo clippy --all-targets --locked --manifest-path app/Cargo.toml -- -D warnings
+      - name: Build NXConvert
+        run: cargo build --release --locked --manifest-path app/Cargo.toml
+      - name: Test artwork handling
+        run: cargo test --locked --manifest-path app/Cargo.toml
+      - name: Run it headless
+        shell: bash
+        run: |
+          app/target/release/nxconvert --version
+          app/target/release/nxconvert contents tests/fixtures/dlc_only_application.nx | grep -q '^@SIZE'
+
+  coverage-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build coverage-guided sanitizer fuzzer
+        run: clang++ -std=c++17 -g -O1 -fsanitize=fuzzer,address,undefined -Idist tests/fuzz/nx_reader_fuzz.cpp -o /tmp/nx_reader_fuzz
+      - name: Fuzz copied fixture seeds for one minute
+        run: |
+          mkdir -p /tmp/nx-corpus
+          cp tests/fixtures/*.nx /tmp/nx-corpus/
+          /tmp/nx_reader_fuzz /tmp/nx-corpus -max_total_time=60 -timeout=10 -rss_limit_mb=1024

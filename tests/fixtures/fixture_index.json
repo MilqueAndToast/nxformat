@@ -1,0 +1,769 @@
+{
+  "format": "NX 0.2 synthetic conformance fixtures",
+  "generator": "tests/conformance/build_fixtures.py",
+  "fixtures": [
+    {
+      "file": "minimal_valid.nx",
+      "expected": "accept",
+      "reason": "empty complete base snapshot",
+      "size": 8736,
+      "sha256": "e426e1f8543372bb3dc45d5971b767ed25443ef9b562a4ffaa2e6c90fb5e63a8",
+      "characteristics": [
+        "1 app",
+        "1 program",
+        "1 snapshot",
+        "1 empty root",
+        "0 files",
+        "0 blocks"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "raw_only.nx",
+      "expected": "accept",
+      "reason": "one RAW data block",
+      "size": 8900,
+      "sha256": "9916568755d48f5f770821bdbc7874e56e453e85fed4644b1ca69165d41d4f66",
+      "characteristics": [
+        "file size=4",
+        "chunk log2=16",
+        "one RAW block",
+        "no ZSTD blocks"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "nested_vfs.nx",
+      "expected": "accept",
+      "reason": "root and child directory entries with independently addressable files",
+      "size": 9080,
+      "sha256": "681e179695bca579285a2f39e93f6da0b6d83d87e1e08cfa8212d6d22c444c1a",
+      "characteristics": [
+        "root has one directory and one file",
+        "folder contains child.bin",
+        "two files and two RAW blocks"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "zstd_single.nx",
+      "expected": "accept",
+      "reason": "one independent Zstandard frame and full snapshot Build ID",
+      "size": 8916,
+      "sha256": "f0d261c7e5e60b38f3a530ee814b224d2358ee7c69b99af33a06dedf92f0e97b",
+      "characteristics": [
+        "file size=4096",
+        "one ZSTD block",
+        "32-byte snapshot Build ID"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "multi_block_file.nx",
+      "expected": "accept",
+      "reason": "one file crosses a fixed chunk boundary",
+      "size": 74468,
+      "sha256": "87c88b4172c22b5f66fdf8e1cfeea406b1d7a4cedfc0efed3d1bd3a1c795078d",
+      "characteristics": [
+        "file size=65537",
+        "block logical sizes=65536,1",
+        "two RAW blocks"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "mixed_raw_zstd.nx",
+      "expected": "accept",
+      "reason": "a 256 KiB RAW block followed by a 256 KiB independent Zstandard block",
+      "size": 271200,
+      "sha256": "0238a2790a779aa852f4e88a7be1c96830966a69a9138cc00cc32e56a2431a51",
+      "characteristics": [
+        "chunk log2=18",
+        "block 0 RAW and 256 KiB",
+        "block 1 Zstandard and 256 KiB",
+        "single-block slices and a cross-codec read"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "shared_blocks.nx",
+      "expected": "accept",
+      "reason": "identical files share one block",
+      "size": 8996,
+      "sha256": "85979ed020edb13b4f1b7c61de1c03eec809494f87b2a28ec91fc0e7d9ae1a18",
+      "characteristics": [
+        "2 file records",
+        "1 unique block",
+        "both references target block 0"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "shared_with_orphan_block.nx",
+      "expected": "accept",
+      "reason": "two files share block 0 and block 1 is physically present but unreferenced",
+      "size": 9048,
+      "sha256": "2cf58503f2264b354315873937e6313b0a66b9d65ab0f5f0331d6eb148213ca9",
+      "characteristics": [
+        "2 file records reference block 0",
+        "block 1 has no Manifest reference",
+        "full verification covers both physical blocks"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "corrupted_orphan_block.nx",
+      "expected": "reject_full_verify",
+      "reason": "unreferenced physical block differs from its integrity digest",
+      "size": 9048,
+      "sha256": "39e6e1ef73b474bccf8c8c3f4757b6a477119e30bf965a07f7381e68f8871ec1",
+      "characteristics": [
+        "shared referenced block remains valid",
+        "unreferenced block 1 payload byte changed",
+        "index and integrity table remain valid"
+      ],
+      "expected_error": "block_hash"
+    },
+    {
+      "file": "shared_snapshots.nx",
+      "expected": "accept",
+      "reason": "two versioned complete roots share a tree, file and blocks",
+      "size": 9044,
+      "sha256": "7026c57ee8ade01fa2a754434f6f2689cd5fa267f12cf6c2d51c8edf9b763332",
+      "characteristics": [
+        "2 snapshots with different versions",
+        "same root directory",
+        "distinct version-scoped identities",
+        "1 unique block"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "deleted_between_versions.nx",
+      "expected": "accept",
+      "reason": "later full tree omits a deleted file",
+      "size": 9208,
+      "sha256": "cd2711a0d2ca93f5f87251da345a0b211d17e6579fd91cb7eb09a5c7ec048e34",
+      "characteristics": [
+        "2 snapshots",
+        "version 0 contains keep.bin and remove.bin",
+        "version 1 contains keep.bin only"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "multiple_programs.nx",
+      "expected": "accept",
+      "reason": "one app has two independent programs",
+      "size": 9240,
+      "sha256": "aac4db53d11f5ace5cf3c503d80fbeff3169de9dc99f5fc33f592eaebd3da807",
+      "characteristics": [
+        "1 app",
+        "2 sorted program IDs",
+        "2 snapshots",
+        "2 roots"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "metadata_snapshot_tie.nx",
+      "expected": "accept",
+      "reason": "equal-version metadata source uses greatest Catalog snapshot index while the other snapshot retains its own native metadata",
+      "size": 9632,
+      "sha256": "1b55e3415e2e1411918992418ed56c963a324ccda58dfcdde42247a58763f8ce",
+      "characteristics": [
+        "two executable programs",
+        "both version=5",
+        "metadata_snapshot_index=1",
+        "required per-snapshot metadata history extension",
+        "historical languages=ja,zh-hans",
+        "historical original PNG shared by default and localized icon refs",
+        "historical NACP media reference"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "localized_metadata_icons.nx",
+      "expected": "accept",
+      "reason": "localized title and separately addressable icon",
+      "size": 9072,
+      "sha256": "02af207ecafbb06556428f8142018eec1552bd520c9f09dd879c492b0f81e467",
+      "characteristics": [
+        "default title=Example",
+        "localized language=ja",
+        "two independent synthetic PNG media payloads"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "switch2_localized_icons.nx",
+      "expected": "accept",
+      "reason": "synthetic Switch 2 catalog with multilingual labels and one shared original PNG icon",
+      "size": 9008,
+      "sha256": "f639f1a64f2332285106d5b7ba0f14b28d61ccedc8825930f1e8046679624222",
+      "characteristics": [
+        "platform=2",
+        "localized languages=fr,ja",
+        "one icon media record shared by both languages"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "jpeg_icon.nx",
+      "expected": "accept",
+      "reason": "on-demand JPEG icon retains its exact 285-byte synthetic JPEG payload",
+      "size": 9120,
+      "sha256": "9f2084ed69919ae09de12a5ea069407db020596970990a4cd492c5ed1c089653",
+      "characteristics": [
+        "media type=2 JPEG",
+        "default application icon",
+        "exact original SHA-256 is asserted by the C++ reader test"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "same_application_id_cross_platform.nx",
+      "expected": "accept",
+      "reason": "application uniqueness is scoped by platform plus Application ID",
+      "size": 8960,
+      "sha256": "5c840d535369d2f37d65ce9e5f7f1374a4d2991659a2defeaf0237cb7bbc08b2",
+      "characteristics": [
+        "same numeric Application ID on platforms 0 and 2",
+        "two independent programs and snapshots",
+        "different platform-scoped snapshot identities"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "dlc_without_program.nx",
+      "expected": "accept",
+      "reason": "DLC complete tree has no executable Program ID",
+      "size": 8880,
+      "sha256": "beaa1f2c2e07cc42e8d880cb01dca3e132e0ea11d54278f150218f7c7270c92c",
+      "characteristics": [
+        "1 base executable program",
+        "DLC program_index=0xffffffff",
+        "distinct snapshot identity scope"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "dlc_with_program.nx",
+      "expected": "accept",
+      "reason": "DLC may name a real source-provided executable Program ID",
+      "size": 8864,
+      "sha256": "3ff273828956fc04f1d35d0385e29923a5f514fcc1f687eeb07f71ca1f6eaee1",
+      "characteristics": [
+        "base and DLC share program 0",
+        "DLC Program ID is not fabricated"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "distinct_dlc_same_tree.nx",
+      "expected": "accept",
+      "reason": "two DLCs with equal trees/versions but different source content IDs have distinct identities",
+      "size": 8976,
+      "sha256": "00af47ec2dd77966e9d885aa4bfaf090ab550908340c5fbeae252297b893930c",
+      "characteristics": [
+        "two DLC content IDs",
+        "same empty root",
+        "same numeric version",
+        "distinct snapshot identities"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "dlc_only_application.nx",
+      "expected": "accept",
+      "reason": "DLC-only application has no executable Program rows",
+      "size": 8640,
+      "sha256": "dd4c3db38c597fae10ab67721b929a8ea36bc07c1712c256ba8dfdf26d74a68f",
+      "characteristics": [
+        "application program_count=0",
+        "first_program_index=0xffffffff",
+        "one unassociated DLC snapshot"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "empty_files.nx",
+      "expected": "accept",
+      "reason": "zero-byte file has no block references",
+      "size": 8833,
+      "sha256": "00db9b6f37a1e1baa178f702618bc6a4e56bb57f2f3ab681845ee09fd9fb3153",
+      "characteristics": [
+        "file size=0",
+        "block count=0",
+        "SHA-256 of empty bytes"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "corrupted_manifest.nx",
+      "expected": "reject",
+      "reason": "Manifest digest mismatch",
+      "size": 8900,
+      "sha256": "4052635998625b5718513c16c7f6d5869adaeac334346c7ef4f522e391db6c7f",
+      "characteristics": [
+        "Manifest byte changed",
+        "stored manifest SHA-256 unchanged"
+      ],
+      "expected_error": "manifest_hash"
+    },
+    {
+      "file": "corrupted_integrity_table.nx",
+      "expected": "reject",
+      "reason": "Integrity-table checksum mismatch",
+      "size": 8900,
+      "sha256": "0dd0fd885bef5be66352b5c464f51adb843618973e1a27b8cc70ccdcc5e05e3a",
+      "characteristics": [
+        "integrity row 0 changed",
+        "header index_sha256 unchanged"
+      ],
+      "expected_error": "index_hash"
+    },
+    {
+      "file": "corrupted_hot_index.nx",
+      "expected": "reject",
+      "reason": "Hot-index checksum mismatch",
+      "size": 8900,
+      "sha256": "1482c37c2e31a718ae84b1148b293372f9ce0b420827d21bbb6f6d95d2f9ca27",
+      "characteristics": [
+        "one block descriptor byte changed",
+        "header index_sha256 unchanged"
+      ],
+      "expected_error": "index_hash"
+    },
+    {
+      "file": "corrupted_index_sha256.nx",
+      "expected": "reject",
+      "reason": "Header index_sha256 does not match index and integrity bytes",
+      "size": 8900,
+      "sha256": "9790dd3b2f4063e63876d8f10391eea7e00d078a34e1c7d6219ecd13f924d80f",
+      "characteristics": [
+        "index_sha256 byte changed",
+        "header CRC-32C recalculated"
+      ],
+      "expected_error": "index_hash"
+    },
+    {
+      "file": "corrupted_block_payload.nx",
+      "expected": "reject_full_verify",
+      "reason": "RAW block differs from the original integrity digest",
+      "size": 8900,
+      "sha256": "5d5289fbc06ab47034949de28bc83b4bfaf9f3287bebc9df50bbf359b4cd2a9a",
+      "characteristics": [
+        "index and integrity table remain valid",
+        "one data payload byte changed"
+      ],
+      "expected_error": "block_hash"
+    },
+    {
+      "file": "invalid_metadata_snapshot.nx",
+      "expected": "reject",
+      "reason": "Application metadata source points outside its snapshot range",
+      "size": 8736,
+      "sha256": "67daf8814a647832c9c0a667a2bc8c0b6ee137daa68567684033d6e91f1fe518",
+      "characteristics": [
+        "Catalog digest and header CRC recalculated",
+        "metadata_snapshot_index out of range"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_empty_metadata_source.nx",
+      "expected": "reject",
+      "reason": "Metadata source pointer exists without any native metadata",
+      "size": 8704,
+      "sha256": "87735326234d1cfe04f720251905a04c9ddf959d38cd96aa8afcc19d2a2ddfff",
+      "characteristics": [
+        "no native metadata",
+        "forged metadata source index 0",
+        "Catalog hash refreshed"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_history_media_type.nx",
+      "expected": "reject",
+      "reason": "Historical icon reference targets an NACP Media record",
+      "size": 9632,
+      "sha256": "ed33659401700c0d6a688bf4514de9509fc4a90242d6628414d4b4c2fbdecf45",
+      "characteristics": [
+        "Snapshot Metadata History",
+        "icon/NACP type conflict",
+        "Catalog hash refreshed"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_present_empty_title.nx",
+      "expected": "reject",
+      "reason": "Present empty title is forbidden",
+      "size": 8736,
+      "sha256": "f54d8ac5fc310afad428bcc82601bea1f002124f56898b9083139aef95cfd0f7",
+      "characteristics": [
+        "offset 0, length 0",
+        "Catalog hash refreshed"
+      ],
+      "expected_error": "string"
+    },
+    {
+      "file": "invalid_language_subtag.nx",
+      "expected": "reject",
+      "reason": "Empty locale subtag is forbidden",
+      "size": 9072,
+      "sha256": "58fba9d90f9ac4a813ac8ac755f4db84d52fe4186582f1b0d583583a25373a02",
+      "characteristics": [
+        "language j-",
+        "Catalog hash refreshed"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_shared_media_types.nx",
+      "expected": "reject",
+      "reason": "one Media record is referenced as both icon and NPDM",
+      "size": 9072,
+      "sha256": "f7ec9e87a537ce5f967605c5503e9d8e5616dddd5e3aeeceba0e0aa5105b13da",
+      "characteristics": [
+        "Catalog and header digests refreshed",
+        "incompatible Media owners"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "duplicate_snapshot_identity.nx",
+      "expected": "reject",
+      "reason": "two distinct DLC rows claim the same snapshot identity",
+      "size": 8976,
+      "sha256": "d2644732a97987216b35cd8b32c59e2bd5843facc61cc4a4884a7592bd659a04",
+      "characteristics": [
+        "content IDs remain distinct",
+        "Catalog and header digests refreshed"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_snapshot_program.nx",
+      "expected": "reject",
+      "reason": "Non-DLC snapshot has no executable program association",
+      "size": 8736,
+      "sha256": "cc827756b0a5abf474f8f4b383bf68da865b51301089ea6c1dff63ef88637519",
+      "characteristics": [
+        "Catalog digest and header CRC recalculated",
+        "base snapshot program_index is absent"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_build_id_flag.nx",
+      "expected": "reject",
+      "reason": "Snapshot Build ID presence flag disagrees with its 32-byte value",
+      "size": 8736,
+      "sha256": "232ccf66514f5cbe6683cdb60c23a4b38f1ad22866763309a510932cac30c8a7",
+      "characteristics": [
+        "Catalog digest and header CRC recalculated",
+        "Build ID presence set but value all zero"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_program_application.nx",
+      "expected": "reject",
+      "reason": "Program points outside application table",
+      "size": 9240,
+      "sha256": "ee06bff7f9ff5dc4814f14aa1fe664e06d1c1e52ac60955657263eb54d381152",
+      "characteristics": [
+        "Catalog digest and header CRC recalculated",
+        "second program application_index=1"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "duplicate_application_key.nx",
+      "expected": "reject",
+      "reason": "Two application records have the same platform and Application ID",
+      "size": 8960,
+      "sha256": "e796787ce8f29c26dc95abe8c729591338cb7a7a40a3038be780713c5748e75f",
+      "characteristics": [
+        "Catalog digest and header CRC recalculated",
+        "second platform changed from 2 to 0"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_metadata_snapshot_owner.nx",
+      "expected": "reject",
+      "reason": "Application metadata pointer names another application's snapshot",
+      "size": 8960,
+      "sha256": "c237ec81f1aa9bfd6d694fafb31e674550d86f250acfa2e2b8154f7d12ebb10e",
+      "characteristics": [
+        "Catalog digest and header CRC recalculated",
+        "second application metadata_snapshot_index=0"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_program_snapshot_range.nx",
+      "expected": "reject",
+      "reason": "Program snapshot range points to another program",
+      "size": 8960,
+      "sha256": "7e35df0e2cd3181ccdef52563ef66b3a36c6c2341bb73bc0735a06d30e8cd926",
+      "characteristics": [
+        "Catalog digest and header CRC recalculated",
+        "second program first_snapshot_index=0"
+      ],
+      "expected_error": "catalog"
+    },
+    {
+      "file": "invalid_offsets.nx",
+      "expected": "reject",
+      "reason": "Catalog out of bounds",
+      "size": 8736,
+      "sha256": "c2c40258643eab76bc1fe34d51b653552e3268f726d27bbfe9cce856a2864c9b",
+      "characteristics": [
+        "catalog offset beyond archive",
+        "header CRC-32C recalculated"
+      ],
+      "expected_error": "bounds"
+    },
+    {
+      "file": "truncated_archive.nx",
+      "expected": "reject",
+      "reason": "declared and actual archive lengths differ",
+      "size": 8735,
+      "sha256": "8443217797b239ba1795233bd375ed50d6c5673506b4c615f98d1e47144c5cd0",
+      "characteristics": [
+        "one final byte removed",
+        "header archive size unchanged"
+      ],
+      "expected_error": "length"
+    },
+    {
+      "file": "invalid_path.nx",
+      "expected": "reject",
+      "reason": "unsafe path component",
+      "size": 8900,
+      "sha256": "41919175b05d4426c2bc10f557f0a06c376906c949cc652ee7afc4c29f19fdf5",
+      "characteristics": [
+        "component=../bad",
+        "Manifest digest and header CRC recalculated"
+      ],
+      "expected_error": "path"
+    },
+    {
+      "file": "cyclic_directory.nx",
+      "expected": "reject",
+      "reason": "a directory Entry points back at the snapshot root",
+      "size": 9080,
+      "sha256": "cf7426af9cbf0689de31058e3bcf40d5fd6d46967a7c762a004cba2f88bb8e14",
+      "characteristics": [
+        "folder/child.bin retargeted to directory 0",
+        "Manifest digest and header CRC recalculated"
+      ],
+      "expected_error": "manifest"
+    },
+    {
+      "file": "repeated_directory.nx",
+      "expected": "reject",
+      "reason": "two Entries of one snapshot reach the same directory",
+      "size": 9076,
+      "sha256": "8f31160ad332fb8f3db37a22aec473993fc70e15d3cdf4dbece80b364bcef006",
+      "characteristics": [
+        "a/ and b/ both target directory 1",
+        "Manifest digest and header CRC recalculated"
+      ],
+      "expected_error": "manifest"
+    },
+    {
+      "file": "repeated_file.nx",
+      "expected": "reject",
+      "reason": "one File record appears at two paths of one snapshot",
+      "size": 8996,
+      "sha256": "b03a6ee94452f40f5ae23f080262a92885137f18e19863a3ab499755f77a3553",
+      "characteristics": [
+        "a.bin and b.bin both target file 0",
+        "identity and logical size unchanged",
+        "Manifest digest and header CRC recalculated"
+      ],
+      "expected_error": "manifest"
+    },
+    {
+      "file": "unknown_mandatory_feature.nx",
+      "expected": "reject",
+      "reason": "unknown required feature bit",
+      "size": 8736,
+      "sha256": "6fa4d6b44161fa53d888fc428db49f4b880f79f9f831ec5966711d9baade3295",
+      "characteristics": [
+        "unknown required feature bit 1 set",
+        "header CRC-32C recalculated"
+      ],
+      "expected_error": "feature"
+    },
+    {
+      "file": "appended_generation.nx",
+      "expected": "accept",
+      "reason": "in-place edit: generation 1 tail after free space",
+      "size": 10000,
+      "sha256": "736eac0cd95632b5e85a910b4b341c10e8b334e8cb1f0ac1ec22fba4dcb4a76a",
+      "characteristics": [
+        "slot B generation 1",
+        "slot A generation 0 still valid",
+        "stale tail and arbitrary free bytes before the new tail",
+        "Media region moved with the tail"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "appended_generation_2.nx",
+      "expected": "accept",
+      "reason": "two in-place edits alternate slots",
+      "size": 10928,
+      "sha256": "fd384c0357aada55aea956c531187ec29f51f62d8a1b64aa3e9dec827ee7204d",
+      "characteristics": [
+        "slot A generation 2",
+        "slot B generation 1"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "interrupted_commit.nx",
+      "expected": "accept",
+      "reason": "torn newer slot falls back to generation 0; trailing residue ignored",
+      "size": 10100,
+      "sha256": "263e3bbac1ebe3efe6852e4adf9030adbe5b7eddfc5c2be56e43349d3da9a6b0",
+      "characteristics": [
+        "slot B CRC invalid",
+        "100 bytes after archive_size"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "damaged_slot_a.nx",
+      "expected": "accept",
+      "reason": "slot A damaged, identical slot B used",
+      "size": 8900,
+      "sha256": "8a4002ce21854448e7b6b118d2ef7ed1efc58a1dc641674885360c230d02483f",
+      "characteristics": [
+        "slot A magic changed",
+        "slot B intact"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "lost_header_page_0.nx",
+      "expected": "accept",
+      "reason": "the other generation survives complete header-page damage",
+      "size": 10928,
+      "sha256": "9d25fcde242144689ebed3d320d31cdc565a550ec098541c45c2c9f84d5c0293",
+      "characteristics": [
+        "page 0 entirely overwritten"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "lost_header_page_1.nx",
+      "expected": "accept",
+      "reason": "the other generation survives complete header-page damage",
+      "size": 10928,
+      "sha256": "151d8d554adc67c0d4accc345b3242d515a5b9f775329ca42bcfc19e320423c9",
+      "characteristics": [
+        "page 1 entirely overwritten"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "bad_header_page_padding_1.nx",
+      "expected": "accept",
+      "reason": "page padding is checked independently",
+      "size": 8900,
+      "sha256": "dbc5b8a0b16df5eebfe404be97996c2b777affe79ebfaab14a6baeecf44ef8ec",
+      "characteristics": [
+        "bad padding in 1 pages"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "bad_header_page_padding_2.nx",
+      "expected": "reject",
+      "reason": "page padding is checked independently",
+      "size": 8900,
+      "sha256": "f0b948d4a307100ff2949cc57b604de06e24ececedf739cf72ace0fa1b3d9793",
+      "characteristics": [
+        "bad padding in 2 pages"
+      ],
+      "expected_error": "unsupported"
+    },
+    {
+      "file": "legacy_shared_header_page.nx",
+      "expected": "reject",
+      "reason": "earlier draft used the shared header page",
+      "size": 8736,
+      "sha256": "7e0eb1225a42d9e882de874cf0275f857f549678a506682ecfb82e6150e89f5c",
+      "characteristics": [
+        "layout flag absent",
+        "second slot at 2048"
+      ],
+      "expected_error": "unsupported"
+    },
+    {
+      "file": "truncated_header_area.nx",
+      "expected": "reject",
+      "reason": "file ends inside the second header page",
+      "size": 8191,
+      "sha256": "e76404c019762c830f2fd1fc66a4716d6b01b835c3105da7e0de5def51a8c326",
+      "characteristics": [
+        "8191-byte file"
+      ],
+      "expected_error": "length"
+    },
+    {
+      "file": "unknown_optional_header_feature.nx",
+      "expected": "reject",
+      "reason": "header optional feature bits are reserved",
+      "size": 8900,
+      "sha256": "76a39734e5af0bb311567771f62531b40d857240fc7f13ad699710a94e56d16d",
+      "characteristics": [
+        "optional header bit 0 set",
+        "valid header CRCs"
+      ],
+      "expected_error": "feature"
+    },
+    {
+      "file": "max_generation.nx",
+      "expected": "accept",
+      "reason": "maximum generation remains readable",
+      "size": 9044,
+      "sha256": "42a3dc8c6bcffe1e687be844c2a65f464c40fa8c8a571d3145b57268f53b43d4",
+      "characteristics": [
+        "both header generations UINT64_MAX"
+      ],
+      "expected_error": null
+    },
+    {
+      "file": "slot_generation_conflict.nx",
+      "expected": "reject",
+      "reason": "both slots valid with generation 0 but different bytes",
+      "size": 8900,
+      "sha256": "558b5eeb2c9f8809a7c54c84c40df39e26fd7a56875bd2b99fa7f188792aba10",
+      "characteristics": [
+        "slot B archive_size changed",
+        "both CRCs valid"
+      ],
+      "expected_error": "format"
+    },
+    {
+      "file": "damaged_both_slots.nx",
+      "expected": "reject",
+      "reason": "no valid header slot",
+      "size": 8900,
+      "sha256": "058c29d79da1a05437fa8ad30899dd1313819e9649e6969eb1b863e7c24883a8",
+      "characteristics": [
+        "slot A and slot B magic changed"
+      ],
+      "expected_error": "unsupported"
+    }
+  ]
+}

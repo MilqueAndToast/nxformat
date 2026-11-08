@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+/build/
+/packer/target/
+CMakeUserPresets.json
+*.obj
+*.pdb
+/ffi/target/
+/app/target/
+/dist-release/

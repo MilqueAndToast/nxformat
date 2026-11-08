@@ -1,0 +1,248 @@
+name: Release
+
+# Builds the C API libraries and the NXConvert app for every platform,
+# publishes them with a populated xmake repository as release attachments.
+# No release step commits to main. Push a tag VX.Y.Z, or run it by hand.
+# A push to a release/** branch only builds and tests, publishing nothing.
+on:
+  push:
+    tags: ["V*"]
+    branches: ["release/**"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, such as 1.0.0 (tag VVERSION is created)"
+        required: true
+      xmake_only:
+        description: "Validate the existing release's xmake package without rebuilding or publishing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.event.inputs.version || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      validate_only: ${{ steps.mode.outputs.validate_only }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select build or existing-release validation
+        id: mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${VERSION#[vV]}"
+          [ -n "$version" ] || version=$(sed -n 's/^version = "\(.*\)"/\1/p' ffi/Cargo.toml | head -1)
+          validate_only=false
+          if [ "${{ inputs.xmake_only }}" = true ]; then
+            validate_only=true
+          elif [ "$GITHUB_REF_TYPE" = tag ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            if gh release view "V$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              validate_only=true
+            fi
+          fi
+          echo "validate_only=$validate_only" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: plan
+    if: needs.plan.outputs.validate_only != 'true'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.validate_only != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            app: true
+          - platform: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            app: true
+          - platform: linux-arm64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            app: true
+          - platform: macos-universal
+            os: macos-latest
+            target: aarch64-apple-darwin
+            target2: x86_64-apple-darwin
+            app: true
+          - platform: android-arm64
+            os: ubuntu-latest
+            target: aarch64-linux-android
+            app: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}${{ matrix.target2 && format(',{0}', matrix.target2) || '' }}
+      - name: Version
+        shell: bash
+        run: |
+          version="${VERSION#[vV]}"
+          [ -n "$version" ] || version=$(sed -n 's/^version = "\(.*\)"/\1/p' ffi/Cargo.toml | head -1)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          for manifest in packer/Cargo.toml ffi/Cargo.toml app/Cargo.toml; do
+            grep -q "^version = \"$version\"" "$manifest" || { echo "$manifest is not version $version"; exit 1; }
+          done
+
+      - name: Build the libraries (Android)
+        if: matrix.platform == 'android-arm64'
+        shell: bash
+        run: |
+          cargo install cargo-ndk --locked
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          (cd ffi && cargo ndk -t arm64-v8a --platform 24 build --release --locked)
+          echo "LIB_DIR=ffi/target/${{ matrix.target }}/release" >> "$GITHUB_ENV"
+      - name: Build the libraries and the app
+        if: matrix.platform != 'android-arm64'
+        shell: bash
+        run: |
+          for target in ${{ matrix.target }} ${{ matrix.target2 }}; do
+            cargo build --release --locked --target "$target" --manifest-path ffi/Cargo.toml
+            cargo build --release --locked --target "$target" --manifest-path app/Cargo.toml
+          done
+          if [ -n "${{ matrix.target2 }}" ]; then
+            out=build/universal
+            mkdir -p "$out"
+            for file in libnxformat.dylib libnxformat.a; do
+              lipo -create "ffi/target/${{ matrix.target }}/release/$file" "ffi/target/${{ matrix.target2 }}/release/$file" -output "$out/$file"
+            done
+            lipo -create "app/target/${{ matrix.target }}/release/nxconvert" "app/target/${{ matrix.target2 }}/release/nxconvert" -output "$out/nxconvert"
+            echo "LIB_DIR=$out" >> "$GITHUB_ENV"
+            echo "APP=$out/nxconvert" >> "$GITHUB_ENV"
+          else
+            echo "LIB_DIR=ffi/target/${{ matrix.target }}/release" >> "$GITHUB_ENV"
+            exe=""; [ "$RUNNER_OS" = Windows ] && exe=.exe
+            echo "APP=app/target/${{ matrix.target }}/release/nxconvert$exe" >> "$GITHUB_ENV"
+          fi
+      # After the Rust build: in bash, the MSVC environment would put link.exe
+      # behind Git's own link command.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Link a C program against the built libraries
+        if: matrix.platform != 'android-arm64'
+        run: |
+          python tools/test_c_api.py --lib-dir ${{ env.LIB_DIR }}
+          python tools/test_c_api.py --lib-dir ${{ env.LIB_DIR }} --static
+      - name: Pack
+        shell: bash
+        run: |
+          app_args=()
+          if [ "${{ matrix.app }}" = true ]; then app_args=(--app "$APP"); fi
+          python tools/package_release.py --platform ${{ matrix.platform }} --version "$VERSION" --lib-dir "$LIB_DIR" "${app_args[@]}" --out dist-release
+      - name: Test packaged CMake consumers
+        if: matrix.platform != 'android-arm64'
+        run: python tools/test_release_package.py --archive-dir dist-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nxformat-${{ matrix.platform }}
+          path: dist-release/nxformat-*
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, build, validate]
+    if: needs.plan.outputs.validate_only != 'true' && (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-release
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${VERSION#[vV]}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          sha256sum dist-release/nxformat-* | sed 's|dist-release/||' > dist-release/SHA256SUMS
+          python tools/xmake_recipe.py --add "$version" dist-release/SHA256SUMS
+          mkdir -p build/xmake-repository
+          cp -R packages build/xmake-repository/
+          cp LICENSE build/xmake-repository/
+          python -c 'import shutil,sys; shutil.make_archive("dist-release/nxformat-xmake-" + sys.argv[1], "zip", "build/xmake-repository")' "$version"
+          cd dist-release
+          sha256sum nxformat-* > SHA256SUMS
+          cat SHA256SUMS
+          if gh release view "V$version" >/dev/null 2>&1; then
+            echo "Release V$version already exists; use a new version instead of replacing published binaries."
+            exit 1
+          fi
+          gh release create "V$version" nxformat-* SHA256SUMS --title "nxformat $version" \
+            --notes-file ../docs/RELEASE.md \
+            --target "${{ github.sha }}"
+
+  xmake:
+    needs: [plan, publish]
+    if: always() && !cancelled() && needs.plan.result == 'success' && (needs.publish.result == 'success' || needs.plan.outputs.validate_only == 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        shared: [true, false]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: nxformat
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Download the published xmake repository
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${VERSION#[vV]}"
+          gh release download "V$version" --repo "$GITHUB_REPOSITORY" --pattern "nxformat-xmake-$version.zip" --dir recipe-download
+          python -m zipfile -e "recipe-download/nxformat-xmake-$version.zip" nxformat
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+      - name: Use the package from an xmake project
+        shell: bash
+        run: |
+          version="${VERSION#[vV]}"
+          root=$(cd nxformat && (pwd -W 2>/dev/null || pwd))
+          mkdir consumer && cd consumer
+          cp ../nxformat/ffi/tests/smoke.c .
+          cat > xmake.lua <<EOF
+          add_repositories("nxformat $root")
+          add_requires("nxformat $version", {configs = {shared = ${{ matrix.shared }}}})
+          target("smoke")
+              set_kind("binary")
+              add_files("smoke.c")
+              add_packages("nxformat")
+          EOF
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Git Bash defaults to msys; the released libraries target MSVC.
+            xmake f -y -m release -p windows -a x64 --toolchain=msvc
+          else
+            xmake f -y -m release
+          fi
+          xmake build -y
+          xmake run smoke "$root/tests/fixtures/dlc_only_application.nx"

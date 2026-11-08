@@ -1,0 +1,22 @@
+[package]
+name = "nxformat-ffi"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+description = "C API of the nxconvert commands, for emulators and other frontends"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "nxformat"
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+nxformat-packer = { path = "../packer" }
+
+[profile.release]
+panic = "unwind"
+codegen-units = 1
+lto = "thin"
