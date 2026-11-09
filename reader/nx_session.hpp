@@ -24,6 +24,12 @@ struct SessionOptions {
     // A read that spans several Zstandard blocks hands the later ones to the
     // worker, which decodes from the end while the caller decodes from the start.
     bool split_reads = true;
+    // false (default): read() writes each verified block straight to the
+    // output, so a failed read may leave verified bytes of earlier blocks in
+    // it; unverified bytes are zeroed before returning. true: read() stages multi-block
+    // ranges and leaves the output unchanged on failure (slower: one
+    // range-sized allocation and copy per multi-block read).
+    bool atomic_reads = false;
 };
 
 struct SessionStats {
@@ -88,36 +94,26 @@ public:
     void stop() noexcept {
         stopped_.store(true,std::memory_order_release);
         { std::lock_guard<std::mutex> lock(queue_mutex_); cancelled_+=queue_.size(); queue_.clear(); }
+        // Lock so a sleeper between its predicate test and wait() sees stopped_.
+        { std::lock_guard<std::mutex> lock(gate_mutex_); }
         queue_cv_.notify_all(); gate_cv_.notify_all();
     }
 
+    // Fast by default; see SessionOptions::atomic_reads. Use read_partial()
+    // to learn how many leading bytes were verified when a read fails.
     Status read(FileId file, std::uint64_t offset, std::size_t length, std::uint8_t* output,
                 std::size_t capacity, const std::shared_ptr<ReadCursor>& cursor = {}) {
-        if (cursor) {
-            std::lock_guard<std::mutex> lock(cursor->mutex);
-            // Invalidate old speculation when the seek is requested, before
-            // waiting for admission/IO, even if the new demand later fails.
-            if (cursor->initialized && (cursor->file.value!=file.value || cursor->end!=offset)) {
-                ++cursor->generation; cursor->has_prediction=false;
-            }
-        }
-        // Reject invalid demand buffers before scheduling any background IO.
-        if (length>capacity || (length && !output) || length>options_.reader.max_read_bytes)
-            return Status::failure(ErrorCode::resource_limit,"read buffer or configured read limit is too small");
-        Admission admitted(*this,false);
-        if (!admitted) return Status::failure(ErrorCode::cancelled,"persistent reader stopped");
-        if (options_.split_reads && length && worker_.joinable() && length<=capacity) {
-            try { split(file,offset,length); }
-            catch (const std::bad_alloc&) { std::lock_guard<std::mutex> lock(queue_mutex_); ++dropped_; }
-        }
-        auto result=archive_.read_file(file,offset,length,output,capacity);
-        if (result && cursor && length && worker_.joinable() && options_.sequential_prefetch && options_.lookahead_blocks) {
-            // Speculation is optional: allocator pressure must not fail a
-            // demand read whose verified bytes have already been committed.
-            try { predict(file,offset,length,cursor); }
-            catch (const std::bad_alloc&) { std::lock_guard<std::mutex> lock(queue_mutex_); ++dropped_; }
-        }
-        return result;
+        return demand(file,offset,length,output,capacity,cursor,!options_.atomic_reads).status;
+    }
+
+    // Faster for short-read callers such as an emulator VFS: verified blocks
+    // go straight to `output`, with no range staging. On failure, `bytes`
+    // leading bytes are verified and written; the rest holds no unverified
+    // data (untouched, or zeroed after a direct RAW read). See
+    // Archive::read_file_partial().
+    PartialRead read_partial(FileId file, std::uint64_t offset, std::size_t length, std::uint8_t* output,
+                             std::size_t capacity, const std::shared_ptr<ReadCursor>& cursor = {}) {
+        return demand(file,offset,length,output,capacity,cursor,true);
     }
 
     // Independent verification deliberately bypasses the verified block cache.
@@ -135,6 +131,38 @@ public:
     }
 
 private:
+    PartialRead demand(FileId file, std::uint64_t offset, std::size_t length, std::uint8_t* output,
+                       std::size_t capacity, const std::shared_ptr<ReadCursor>& cursor, bool partial) {
+        const auto failure=[](ErrorCode code,const char* message) { PartialRead r; r.status=Status::failure(code,message); return r; };
+        if (cursor) {
+            std::lock_guard<std::mutex> lock(cursor->mutex);
+            // Invalidate old speculation when the seek is requested, before
+            // waiting for admission/IO, even if the new demand later fails.
+            if (cursor->initialized && (cursor->file.value!=file.value || cursor->end!=offset)) {
+                ++cursor->generation; cursor->has_prediction=false;
+            }
+        }
+        // Reject invalid demand buffers before scheduling any background IO.
+        if (length>capacity || (length && !output) || length>options_.reader.max_read_bytes)
+            return failure(ErrorCode::resource_limit,"read buffer or configured read limit is too small");
+        Admission admitted(*this,false);
+        if (!admitted) return failure(ErrorCode::cancelled,"persistent reader stopped");
+        if (options_.split_reads && length && worker_.joinable() && length<=capacity) {
+            try { split(file,offset,length); }
+            catch (const std::bad_alloc&) { std::lock_guard<std::mutex> lock(queue_mutex_); ++dropped_; }
+        }
+        PartialRead result;
+        if (partial) result=archive_.read_file_partial(file,offset,length,output,capacity);
+        else { result.status=archive_.read_file(file,offset,length,output,capacity); if (result.status) result.bytes=length; }
+        if (result && cursor && length && worker_.joinable() && options_.sequential_prefetch && options_.lookahead_blocks) {
+            // Speculation is optional: allocator pressure must not fail a
+            // demand read whose verified bytes have already been committed.
+            try { predict(file,offset,length,cursor); }
+            catch (const std::bad_alloc&) { std::lock_guard<std::mutex> lock(queue_mutex_); ++dropped_; }
+        }
+        return result;
+    }
+
     Session(std::shared_ptr<RandomAccessSource> source, SessionOptions options)
         : source_(std::move(source)), options_(options) {}
     static bool cancelled(void* context) {
@@ -142,21 +170,45 @@ private:
         return s.stopped_.load(std::memory_order_acquire) ||
             (s.options_.reader.is_cancelled && s.options_.reader.is_cancelled(s.options_.reader.cancellation_context));
     }
+    // Slots are an atomic counter, so an uncontended read takes no lock. The
+    // mutex and condition variable are only used to sleep when the limit is
+    // reached. No lost wakeup: a sleeper raises `sleepers_` under the mutex
+    // before it tests `active_`; a releaser lowers `active_` before it reads
+    // `sleepers_` (both sequentially consistent), then locks before notifying.
     class Admission {
     public:
         Admission(Session& s,bool background):session_(s) {
-            std::unique_lock<std::mutex> lock(s.gate_mutex_);
             // Reserve a demand slot; prefetch never consumes the last one.
             const auto limit=background ? (s.options_.parallel_reads>1 ? s.options_.parallel_reads-1 : 1) : s.options_.parallel_reads;
+            if (cancelled(&s)) return;
+            if (try_take(limit,background)) return;
+            std::unique_lock<std::mutex> lock(s.gate_mutex_);
+            ++s.sleepers_;
             if (!background) ++s.waiting_demands_;
-            s.gate_cv_.wait(lock,[&] { return cancelled(&s) ||
-                (s.active_<limit && (!background || !s.waiting_demands_)); });
+            s.gate_cv_.wait(lock,[&] { return cancelled(&s) || try_take(limit,background); });
             if (!background) --s.waiting_demands_;
-            if (!cancelled(&s)) { ++s.active_; entered_=true; }
+            --s.sleepers_;
+            if (entered_ && cancelled(&s)) { lock.unlock(); release(); }
         }
-        ~Admission() { if (entered_) { {std::lock_guard<std::mutex> lock(session_.gate_mutex_); --session_.active_;} session_.gate_cv_.notify_all(); } }
+        ~Admission() { if (entered_) release(); }
         explicit operator bool() const { return entered_; }
     private:
+        bool try_take(std::size_t limit,bool background) {
+            auto& s=session_;
+            auto active=s.active_.load();
+            while (active<limit && (!background || !s.waiting_demands_.load())) {
+                if (s.active_.compare_exchange_weak(active,active+1)) { entered_=true; return true; }
+            }
+            return false;
+        }
+        void release() {
+            entered_=false;
+            session_.active_.fetch_sub(1);
+            if (session_.sleepers_.load()) {
+                { std::lock_guard<std::mutex> lock(session_.gate_mutex_); }
+                session_.gate_cv_.notify_all();
+            }
+        }
         Session& session_;
         bool entered_=false;
     };
@@ -242,7 +294,7 @@ private:
     std::atomic<bool> stopped_{false};
     std::mutex gate_mutex_;
     std::condition_variable gate_cv_;
-    std::size_t active_=0,waiting_demands_=0;
+    std::atomic<std::size_t> active_{0},waiting_demands_{0},sleepers_{0};
     mutable std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::deque<Job> queue_;

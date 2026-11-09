@@ -1532,7 +1532,24 @@ impl Output {
 
     /// Read already written bytes back (exact dedup comparison).
     fn read_at(&mut self, offset: u64, bytes: &mut [u8]) -> Result<(), WriterError> {
-        self.file.flush()?;
+        let end = offset
+            .checked_add(bytes.len() as u64)
+            .filter(|&end| end <= self.position)
+            .ok_or_else(|| {
+                WriterError::new(WriterErrorKind::Integrity, "read past written data")
+            })?;
+        let buffered = self.file.buffer().len() as u64;
+        let on_disk = self.position - buffered;
+        if offset >= on_disk {
+            // Still in the write buffer: copy it, no flush or syscall.
+            let at = (offset - on_disk) as usize;
+            bytes.copy_from_slice(&self.file.buffer()[at..at + bytes.len()]);
+            return Ok(());
+        }
+        if end > on_disk {
+            // Straddles disk and buffer (rare): make it all disk bytes.
+            self.file.flush()?;
+        }
         let file = self.file.get_mut();
         #[cfg(unix)]
         {
@@ -1542,9 +1559,11 @@ impl Output {
         }
         #[cfg(not(unix))]
         {
+            // The OS cursor must stay where the buffered bytes will be written.
+            let resume = file.stream_position()?;
             file.seek(SeekFrom::Start(offset))?;
             file.read_exact(bytes)?;
-            file.seek(SeekFrom::Start(self.position))?;
+            file.seek(SeekFrom::Start(resume))?;
         }
         Ok(())
     }
@@ -1562,10 +1581,12 @@ fn verify_frame(
         d.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(20))?;
         *decoder = Some(d);
     }
-    scratch.clear();
-    scratch
-        .try_reserve(input.len())
-        .map_err(|_| limit_error("unable to reserve frame verification buffer"))?;
+    // The decoder overwrites the buffer; only newly grown bytes get zeroed.
+    if scratch.len() < input.len() {
+        scratch
+            .try_reserve(input.len() - scratch.len())
+            .map_err(|_| limit_error("unable to reserve frame verification buffer"))?;
+    }
     scratch.resize(input.len(), 0);
     let decoded = decoder
         .as_mut()
@@ -1620,10 +1641,12 @@ impl DataSink {
             ));
         }
         let (offset, stored, codec) = (block.data_offset, block.stored_size as usize, block.codec);
-        self.compare.clear();
-        self.compare
-            .try_reserve(bytes.len())
-            .map_err(|_| limit_error("unable to reserve dedup comparison buffer"))?;
+        // Reads and decodes overwrite these buffers; only grown bytes get zeroed.
+        if self.compare.len() < bytes.len() {
+            self.compare
+                .try_reserve(bytes.len() - self.compare.len())
+                .map_err(|_| limit_error("unable to reserve dedup comparison buffer"))?;
+        }
         self.compare.resize(bytes.len(), 0);
         if codec == 0 {
             let mut compare = std::mem::take(&mut self.compare);
@@ -1632,10 +1655,11 @@ impl DataSink {
             self.compare = compare;
             return Ok(equal);
         }
-        self.frame.clear();
-        self.frame
-            .try_reserve(stored)
-            .map_err(|_| limit_error("unable to reserve dedup frame buffer"))?;
+        if self.frame.len() < stored {
+            self.frame
+                .try_reserve(stored - self.frame.len())
+                .map_err(|_| limit_error("unable to reserve dedup frame buffer"))?;
+        }
         self.frame.resize(stored, 0);
         let mut frame = std::mem::take(&mut self.frame);
         self.out.read_at(offset, &mut frame)?;

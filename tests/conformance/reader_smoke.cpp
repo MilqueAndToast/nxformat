@@ -80,9 +80,11 @@ class FailPayloadSource final : public nx::RandomAccessSource {
 public:
     explicit FailPayloadSource(const std::vector<std::uint8_t>& bytes) : bytes_(bytes) {}
     std::uint64_t size() const noexcept override { return bytes_.size(); }
-    void fail_once_at(std::uint64_t offset) { fail_offset_ = offset; armed_ = true; }
+    // Fail every read that covers the offset (a coalesced run and its per-block retry).
+    void fail_reads_covering(std::uint64_t offset) { fail_offset_ = offset; armed_ = true; }
+    void disarm() { armed_ = false; }
     bool read_at(std::uint64_t offset, std::uint8_t* destination, std::size_t length) override {
-        if (armed_ && offset == fail_offset_) { armed_ = false; return false; }
+        if (armed_ && offset <= fail_offset_ && fail_offset_ - offset < length) return false;
         if (offset > bytes_.size() || length > bytes_.size() - offset) return false;
         if (length) std::copy(bytes_.begin() + static_cast<std::size_t>(offset),
                               bytes_.begin() + static_cast<std::size_t>(offset + length), destination);
@@ -684,8 +686,9 @@ static int atomic_multiblock_read(const std::string& path) {
         return 1;
     }
     std::array<std::uint8_t, 3> output = {0xa5, 0x5a, 0xc3};
-    source.fail_once_at(second_block_payload);
+    source.fail_reads_covering(second_block_payload);
     const auto failed = archive.read_file(resolved.value->id, 65534, output.size(), output.data(), output.size());
+    source.disarm();
     if (failed || failed.error.code != nx::ErrorCode::io || output != std::array<std::uint8_t, 3>{0xa5, 0x5a, 0xc3}) {
         std::cerr << "FAIL later-block I/O error changed caller output or returned wrong status\n"; return 1;
     }
@@ -695,7 +698,32 @@ static int atomic_multiblock_read(const std::string& path) {
         output[2] != static_cast<std::uint8_t>(((65536u * 31u + 7u) & 0xffu))) {
         std::cerr << "FAIL atomic-read retry returned wrong bytes\n"; return 1;
     }
-    std::cout << "PASS multi-block output remains unchanged after second-block I/O failure\n";
+    // The partial mode keeps the verified first block and reports it exactly.
+    const auto expected_byte = [](std::uint64_t at) { return static_cast<std::uint8_t>((at * 31u + 7u) & 0xffu); };
+    output = {0xa5, 0x5a, 0xc3};
+    source.fail_reads_covering(second_block_payload);
+    const auto partial = archive.read_file_partial(resolved.value->id, 65534, output.size(), output.data(), output.size());
+    source.disarm();
+    if (partial || partial.status.error.code != nx::ErrorCode::io || partial.bytes != 2 ||
+        output[0] != expected_byte(65534) || output[1] != expected_byte(65535) || (output[2] != 0xc3 && output[2] != 0)) {
+        std::cerr << "FAIL partial read did not keep exactly the verified prefix after I/O failure\n"; return 1;
+    }
+    // A successful partial multi-block read stages nothing: only RAW slice scratch.
+    std::vector<std::uint8_t> range(static_cast<std::size_t>(std::min<std::uint64_t>(resolved.value->size, 3 * 65536)) - 100, 0);
+    test_allocations.store(0, std::memory_order_relaxed);
+    count_test_allocations.store(true, std::memory_order_relaxed);
+    const auto whole = archive.read_file_partial(resolved.value->id, 100, range.size(), range.data(), range.size());
+    count_test_allocations.store(false, std::memory_order_relaxed);
+    if (!whole || whole.bytes != range.size() || test_allocations.load(std::memory_order_relaxed) > 1) {
+        std::cerr << "FAIL partial multi-block read failed or allocated a staging buffer\n"; return 1;
+    }
+    for (std::size_t i = 0; i < range.size(); ++i)
+        if (range[i] != expected_byte(100 + i)) { std::cerr << "FAIL partial multi-block read returned wrong bytes\n"; return 1; }
+    std::vector<std::uint8_t> atomic_range(range.size(), 0);
+    if (!archive.read_file(resolved.value->id, 100, atomic_range.size(), atomic_range.data(), atomic_range.size()) || atomic_range != range) {
+        std::cerr << "FAIL atomic and partial multi-block reads differ\n"; return 1;
+    }
+    std::cout << "PASS multi-block output remains unchanged after second-block I/O failure; partial read keeps the verified prefix\n";
     return 0;
 }
 

@@ -2825,21 +2825,25 @@ fn verify_source_payloads(
     let mut verified = 0u64;
     let mut stats = VerificationStats::default();
     options.progress.add_total(verification_units(archive));
-    for block in &archive.blocks {
-        let size =
-            decode_source_block(file, block, &mut frame, &mut logical, &mut decoder, options)?;
+    // Each block is decoded once: its CRC-32C is checked the first time a file
+    // hashes it, and blocks no file uses are checked at the end.
+    let mut checked = vec![false; archive.blocks.len()];
+    let check_block = |block_id: usize,
+                       logical: &[u8],
+                       verified: &mut u64,
+                       checked: &mut [bool]|
+     -> Result<(), WriterError> {
+        let block = &archive.blocks[block_id];
         options.progress.add_done(block.logical_size as u64);
-        if !checks_match(block, &logical) {
+        if !checks_match(block, logical) {
             return Err(bad("source block CRC-32C mismatch"));
         }
-        verified = verified
+        *verified = verified
             .checked_add(block.range.size)
             .ok_or_else(|| limit_error("verified byte count overflow"))?;
-        stats.block_decodes += 1;
-        if block.codec == 1 {
-            stats.decompressed_bytes += size as u64;
-        }
-    }
+        checked[block_id] = true;
+        Ok(())
+    };
     for source_media in &archive.media {
         cancelled(options)?;
         if hash_range(file, source_media.range.offset, source_media.size, options)?
@@ -2874,6 +2878,9 @@ fn verify_source_payloads(
             let block_id = archive.block_refs[ri as usize] as usize;
             let block = &archive.blocks[block_id];
             decode_source_block(file, block, &mut frame, &mut logical, &mut decoder, options)?;
+            if !checked[block_id] {
+                check_block(block_id, &logical, &mut verified, &mut checked)?;
+            }
             hash.update(&logical);
             stats.block_decodes += 1;
             if block.codec == 1 {
@@ -2891,6 +2898,18 @@ fn verify_source_payloads(
             }
             cache.push_back(index as u32);
             stats.cache_peak_entries = stats.cache_peak_entries.max(cache.len() as u16);
+        }
+    }
+    for (block_id, block) in archive.blocks.iter().enumerate() {
+        if checked[block_id] {
+            continue;
+        }
+        let size =
+            decode_source_block(file, block, &mut frame, &mut logical, &mut decoder, options)?;
+        check_block(block_id, &logical, &mut verified, &mut checked)?;
+        stats.block_decodes += 1;
+        if block.codec == 1 {
+            stats.decompressed_bytes += size as u64;
         }
     }
     stats.stored_bytes_verified = verified;

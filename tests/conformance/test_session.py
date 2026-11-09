@@ -37,13 +37,17 @@ def main() -> None:
         raw = bytearray((cases / "raw.nx").read_bytes())
         table = struct.unpack_from("<Q", raw, 88)[0]
         payload = struct.unpack_from("<Q", raw, table + 24)[0]
+        mid = bytearray(raw)
         raw[payload + 12] ^= 1
+        # Same block, bad sixth 16 KiB slice: partial reads keep the first five.
+        mid[payload + 5 * 16 * 1024 + 3] ^= 1
         # Never alter supplied cases, even when reusing a private work folder.
         testing = temp / "cases-to-test"
         testing.mkdir()
         for name in ("raw.nx", "zstd.nx"):
             shutil.copyfile(cases / name, testing / name)
         (testing / "corrupt.nx").write_bytes(raw)
+        (testing / "corrupt_mid.nx").write_bytes(mid)
         executable = temp / ("session.exe" if msvc else "session")
         source = str(ROOT / "tests/conformance/session_reader.cpp")
         if msvc:

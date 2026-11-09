@@ -28,6 +28,7 @@ SOFTWARE.
 
 // Portable, read-only NX 0.2 reader. The distributed header is generated from
 // this file without transformations; all wire values are decoded explicitly.
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <list>
@@ -39,7 +40,7 @@ SOFTWARE.
 #include <functional>
 #include <limits>
 #include <memory>
-#include <map>
+#include <unordered_map>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -233,6 +234,17 @@ struct Result {
 };
 
 using Status = Result<bool>;
+
+// Result of a partial read. `bytes` verified file bytes were written to
+// output[0, bytes). output[bytes, length) never holds unverified data: it is
+// untouched, or zeroed where RAW slices were read into it directly. The status is
+// ok exactly when bytes == length, so there is no third state.
+struct PartialRead {
+    std::size_t bytes = 0;
+    Status status;
+    explicit operator bool() const noexcept { return status.ok(); }
+    bool ok() const noexcept { return status.ok(); }
+};
 
 // Backing bytes must remain immutable from open() until Archive destruction.
 // File adapters must prevent writes; remote adapters must pin an object version.
@@ -637,6 +649,8 @@ struct Archive {
         if (!block_cache_) return {};
         std::lock_guard<std::mutex> lock(block_cache_->mutex);
         auto result = block_cache_->stats;
+        result.raw_reads += block_cache_->raw_reads.load(std::memory_order_relaxed);
+        result.stored_bytes_read += block_cache_->raw_bytes.load(std::memory_order_relaxed);
         result.bytes = block_cache_->bytes;
         result.entries = block_cache_->entries.size();
         return result;
@@ -708,6 +722,29 @@ struct Archive {
         return ok_status();
     }
 
+    // One child of a directory by exact name, in O(log n): entries are stored
+    // sorted by byte order. Use this instead of enumerate() to open one file
+    // or subdirectory (VFS GetFile/GetSubdirectory). not_found if absent.
+    Result<DirectoryEntryView> lookup(DirectoryHandle directory, std::string_view name) const {
+        using R = Result<DirectoryEntryView>;
+        if (!mounted_) return R::failure(ErrorCode::invalid_argument, "mount() must succeed before directory lookup");
+        if (directory.snapshot_index >= snapshots_.size() || directory.directory_index >= directories_.size())
+            return R::failure(ErrorCode::bounds, "directory handle is out of range");
+        const auto index = find_entry(directory.directory_index, name);
+        if (index == no_index) return R::failure(ErrorCode::not_found, "directory entry was not found");
+        const auto& entry = entries_[index];
+        DirectoryEntryView view;
+        view.name = {reinterpret_cast<const char*>(manifest_bytes_.data() + entry.name_offset), entry.name_length};
+        view.type = entry.kind == 1 ? EntryType::directory : EntryType::file;
+        if (entry.kind == 1) {
+            view.directory = {directory.snapshot_index, entry.target};
+        } else {
+            view.file = {entry.target};
+            view.size = files_[entry.target].size;
+        }
+        return R::success(view);
+    }
+
     Result<FileInfo> resolve_file(std::uint32_t snapshot_index, std::string_view path) const {
         if (!mounted_) return Result<FileInfo>::failure(ErrorCode::invalid_argument, "mount() must succeed before path resolution");
         std::uint32_t file_id = no_index;
@@ -777,6 +814,28 @@ struct Archive {
         catch (const std::bad_alloc&) { return fail_status(ErrorCode::resource_limit, "read allocation failed"); }
     }
 
+    // Faster variant of read_file() for callers that can use a short read,
+    // such as an emulator VFS. Blocks are verified and committed to `output`
+    // in file order, with no range-sized staging buffer. Whole RAW slices are
+    // read straight into `output` and verified there. On any error
+    // (corruption, IO, cancellation, decoder) the result says how many leading
+    // bytes are verified and written; RAW blocks may stop inside a block, at
+    // the first 16 KiB slice that fails. Bytes after that prefix are untouched
+    // or zeroed: no unverified byte is left in `output` when the call returns.
+    // Same argument checks and max_read_bytes limit as read_file().
+    PartialRead read_file_partial(FileId file_id, std::uint64_t offset, std::size_t length,
+                                  std::uint8_t* output, std::size_t output_capacity) {
+        PartialRead result;
+        if (!mounted_) { result.status = fail_status(ErrorCode::invalid_argument, "mount() must succeed before file reads"); return result; }
+        if (length > output_capacity || (length && output == nullptr) || length > options_.max_read_bytes) {
+            result.status = fail_status(ErrorCode::resource_limit, "read buffer or configured read limit is too small");
+            return result;
+        }
+        try { result.status = read_range(file_id.value, offset, length, output, Sink::partial, result.bytes); }
+        catch (const std::bad_alloc&) { result.status = fail_status(ErrorCode::resource_limit, "read allocation failed"); }
+        return result;
+    }
+
     Status verify_block(std::uint32_t block_id) {
         if (!mounted_) return fail_status(ErrorCode::invalid_argument, "mount() must succeed before block verification");
         try {
@@ -795,12 +854,14 @@ struct Archive {
             }
             // Verify each stored block once, while still hashing every file view.
             std::vector<std::uint8_t> checked(static_cast<std::size_t>(block_count_), 0);
+            // One decode buffer and one stored-bytes scratch for the whole pass.
+            std::vector<std::uint8_t> logical;
+            ReadBuffer stored;
             for (const auto& file : files_) {
                 Sha256 hash;
                 for (std::uint32_t j = 0; j < file.count; ++j) {
                     const std::uint32_t id = block_refs_[file.first + j];
-                    std::vector<std::uint8_t> logical;
-                    Status st = load_block(id, checked[id] == 0, logical, nullptr);
+                    Status st = load_block(id, checked[id] == 0, logical, nullptr, &stored);
                     if (!st) return st;
                     checked[id] = 1;
                     hash.update(logical.data(), logical.size());
@@ -810,8 +871,7 @@ struct Archive {
             // Full verification also covers physical blocks not referenced by files.
             for (std::uint64_t i = 0; i < block_count_; ++i) {
                 if (checked[static_cast<std::size_t>(i)]) continue;
-                std::vector<std::uint8_t> logical;
-                Status st = load_block(static_cast<std::uint32_t>(i), true, logical, nullptr);
+                Status st = load_block(static_cast<std::uint32_t>(i), true, logical, nullptr, &stored);
                 if (!st) return st;
             }
             return ok_status();
@@ -841,18 +901,35 @@ private:
             }
         }
     };
-    struct CachedBlock { std::vector<std::uint8_t> bytes; std::list<std::uint32_t>::iterator position; };
+    // Readers pin a block (shared_ptr copy under the LRU lock) and copy from it
+    // after unlocking. Eviction only drops the cache's reference, so a block
+    // being copied stays alive; at most one block per in-flight read outlives
+    // its eviction, which keeps memory bounded by the admission limit.
+    // `pins` counts readers still copying: taken under the LRU lock, dropped
+    // with release after the copy. A block is recycled only when it reads 0
+    // with acquire, so every finished copy happens before the buffer is reused.
+    struct BlockData { std::vector<std::uint8_t> bytes; std::atomic<std::uint32_t> pins{0}; };
+    using BlockBytes = std::shared_ptr<BlockData>;
+    struct CachedBlock { BlockBytes bytes; std::list<std::uint32_t>::iterator position; };
     struct BlockCache {
         std::mutex mutex;
-        std::map<std::uint32_t, CachedBlock> entries;
+        // Hashed: measured faster than an ordered map under concurrent hits.
+        std::unordered_map<std::uint32_t, CachedBlock> entries;
         std::list<std::uint32_t> lru;
         // Fixed-size lock striping bounds synchronization storage. IO/decode
         // never holds the LRU lock; the same physical block cannot decode twice
         // concurrently. Rare stripe collisions only serialize those misses.
         std::array<std::mutex, 32> loads;
         std::uint64_t bytes = 0;
-        std::vector<std::uint8_t> spare;
+        // The last evicted block nobody still pins, kept with its shared
+        // control block, map node and list node, so a steady-state miss
+        // allocates nothing.
+        BlockBytes spare;
+        std::unordered_map<std::uint32_t, CachedBlock>::node_type spare_node;
+        std::list<std::uint32_t> spare_position;
         CacheStats stats;
+        // RAW reads never touch the LRU; count them without its lock.
+        std::atomic<std::uint64_t> raw_reads{0}, raw_bytes{0};
 
     };
     std::shared_ptr<BlockCache> block_cache_;
@@ -962,14 +1039,27 @@ private:
     Result<std::vector<std::uint8_t>> read_media_impl(std::uint32_t index);
     Status decode_block_record(const std::uint8_t* row, Block& block) const;
     Status block_record(std::uint32_t id, Block& block) const;
-    Status verify_slices(const Block& block, const std::uint8_t* bytes, std::size_t first_slice, std::size_t size) const;
+    // `verified`, when given, receives how many leading bytes passed before a mismatch.
+    Status verify_slices(const Block& block, const std::uint8_t* bytes, std::size_t first_slice, std::size_t size,
+                         std::size_t* verified = nullptr) const;
     Status read_cached_slice(std::uint32_t id, std::size_t offset, std::size_t wanted,
                              std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const;
     Status load_block(std::uint32_t id, bool verify, std::vector<std::uint8_t>& logical,
                       const Block* known_record = nullptr, ReadBuffer* stored_scratch = nullptr) const;
     Status find_file(std::uint32_t snapshot_index, std::string_view path, std::uint32_t& file_id) const;
+    std::uint32_t find_entry(std::uint32_t directory, std::string_view name) const;
     Status read_file_impl(std::uint32_t file_id, std::uint64_t offset,
                           std::size_t length, std::uint8_t* output);
+    // Where read_range() writes. `caller`: the caller's buffer, one atomic
+    // piece (single-block read_file). `staging`: private memory, so RAW
+    // slices may be read and verified in place. `partial`: the caller's
+    // buffer, committed block by block, with a RAW slice-prefix on mismatch.
+    enum class Sink { caller, staging, partial };
+    struct RawPiece { Block block; std::size_t in_chunk = 0, amount = 0, begin = 0, span = 0; };
+    static constexpr std::size_t max_raw_run = 64;
+    static constexpr std::size_t raw_run_bytes = 1024 * 1024;
+    Status read_range(std::uint32_t file_id, std::uint64_t offset, std::size_t length,
+                      std::uint8_t* destination, Sink sink, std::size_t& done);
 };
 
 inline Status Archive::parse_catalog() {
@@ -1640,7 +1730,11 @@ inline Status Archive::mount_impl() {
     Status st=capture(index_offset_,block_count_*24ull,0); if (!st) return st;
     st=capture(integrity_offset_,integrity_size_,block_count_*24ull); if (!st) return st;
     if (index_hash.finish()!=index_digest_) return fail(ErrorCode::integrity,"index_sha256 mismatch");
-    if (options_.collect_read_stats || options_.collect_read_timing || (options_.max_cached_block_bytes && options_.max_cached_blocks)) block_cache_=std::make_shared<BlockCache>();
+    if (options_.collect_read_stats || options_.collect_read_timing || (options_.max_cached_block_bytes && options_.max_cached_blocks)) {
+        block_cache_=std::make_shared<BlockCache>();
+        // No rehash while filling the cache up to its entry limit.
+        block_cache_->entries.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(options_.max_cached_blocks,65536)));
+    }
 
     manifest_bytes_.resize(static_cast<std::size_t>(manifest_size_));
     if (!read(manifest_offset_,manifest_bytes_.data(),manifest_bytes_.size())) return fail(ErrorCode::io,"failed to read Manifest");
@@ -1768,6 +1862,24 @@ inline Status Archive::validate_snapshot_identities() {
     return ok_status();
 }
 
+// Binary search of one directory's sorted entries; no_index when absent.
+inline std::uint32_t Archive::find_entry(std::uint32_t directory,std::string_view name) const {
+    const auto& d=directories_[directory];
+    std::uint32_t low=d.first, high=d.first+d.count;
+    while (low<high) {
+        const auto mid=low+(high-low)/2;
+        const auto& entry=entries_[mid];
+        const std::string_view candidate(reinterpret_cast<const char*>(manifest_bytes_.data()+entry.name_offset),entry.name_length);
+        // Byte order: memcmp compares as unsigned char.
+        const auto n=std::min(candidate.size(),name.size());
+        int order=n ? std::memcmp(candidate.data(),name.data(),n) : 0;
+        if (!order) order=candidate.size()<name.size() ? -1 : candidate.size()>name.size() ? 1 : 0;
+        if (!order) return mid;
+        if (order<0) low=mid+1; else high=mid;
+    }
+    return no_index;
+}
+
 inline Status Archive::find_file(std::uint32_t snapshot_index,std::string_view path,std::uint32_t& file_id) const {
     if (snapshot_index>=snapshots_.size()) return fail(ErrorCode::bounds,"snapshot index is out of range");
     if (path.empty() || !utf8_valid(reinterpret_cast<const std::uint8_t*>(path.data()),path.size())) return fail(ErrorCode::invalid_argument,"path is empty or invalid UTF-8");
@@ -1779,18 +1891,7 @@ inline Status Archive::find_file(std::uint32_t snapshot_index,std::string_view p
         if (end==start || end-start>4096) return fail(ErrorCode::invalid_argument,"path contains an empty or oversized component");
         const auto component=path.substr(start,end-start);
         if (component=="." || component==".." || component.find('\\')!=std::string_view::npos) return fail(ErrorCode::invalid_argument,"path contains an unsafe component");
-        const auto& d=directories_[directory];
-        auto byte_less=[](std::string_view a,std::string_view b) {
-            return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),[](char x,char y){return static_cast<unsigned char>(x)<static_cast<unsigned char>(y);});
-        };
-        std::uint32_t low=d.first, high=d.first+d.count, found=no_index;
-        while (low<high) {
-            const auto mid=low+(high-low)/2;
-            const auto& entry=entries_[mid];
-            const std::string_view name(reinterpret_cast<const char*>(manifest_bytes_.data()+entry.name_offset),entry.name_length);
-            if (name==component) { found=mid; break; }
-            if (byte_less(name,component)) low=mid+1; else high=mid;
-        }
+        const auto found=find_entry(directory,component);
         if (found==no_index) return fail(ErrorCode::not_found,"file path was not found in selected snapshot");
         const auto& entry=entries_[found];
         if (slash==std::string_view::npos) {
@@ -1805,84 +1906,155 @@ inline Status Archive::find_file(std::uint32_t snapshot_index,std::string_view p
 
 inline Status Archive::read_file_impl(std::uint32_t file_id,
                                       std::uint64_t offset,std::size_t length,std::uint8_t* output) {
-    Status st;
     if (file_id>=files_.size()) return fail(ErrorCode::bounds,"file ID is out of range");
     const auto& file=files_[file_id];
     if (offset>file.size || length>file.size-offset) return fail(ErrorCode::bounds,"requested file range is outside logical file");
     if (!length) return ok_status();
+    std::size_t done=0;
+    // A single-block read is fully verified before its one copy, so it goes
+    // straight to the caller. A multi-block read is staged in private memory
+    // so the output stays unchanged when a later block fails.
+    if ((offset>>file.chunk_log2)==((offset+length-1)>>file.chunk_log2))
+        return read_range(file_id,offset,length,output,Sink::caller,done);
+    ReadBuffer staging;  // uninitialized: every byte is written before use
+    staging.reserve(length);
+    Status st=read_range(file_id,offset,length,staging.bytes.get(),Sink::staging,done);
+    if (!st) return st;
+#if defined(NX_READER_DIAGNOSTICS)
+    const auto start=options_.collect_read_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+#endif
+    std::memcpy(output,staging.bytes.get(),length);
+#if defined(NX_READER_DIAGNOSTICS)
+    if (options_.collect_read_timing && block_cache_) {
+        const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
+        std::lock_guard<std::mutex> lock(block_cache_->mutex); block_cache_->stats.copy_ns+=static_cast<std::uint64_t>(ns);
+    }
+#endif
+    return ok_status();
+}
+
+// Writes [offset, offset + length) of the file to `destination` in file order.
+// `done` only grows after the bytes it covers have been verified and copied.
+inline Status Archive::read_range(std::uint32_t file_id, std::uint64_t offset, std::size_t length,
+                                  std::uint8_t* destination, Sink sink, std::size_t& done) {
+    Status st;
+    done=0;
+    if (file_id>=files_.size()) return fail(ErrorCode::bounds,"file ID is out of range");
+    const auto& file=files_[file_id];
+    if (offset>file.size || length>file.size-offset) return fail(ErrorCode::bounds,"requested file range is outside logical file");
     const std::uint64_t chunk_size=1ull<<file.chunk_log2;
-    // Keep atomic output for multi-block reads. A single-block read is already
-    // fully decoded and verified before any bytes are copied to the caller.
-    const bool needs_staging =
-        (offset / chunk_size) != ((offset + length - 1) / chunk_size);
-    std::vector<std::uint8_t> staging;
-    if (needs_staging) staging.resize(length);
-    std::uint8_t* destination = needs_staging ? staging.data() : output;
     ReadBuffer stored;
     // Reuse decoded storage across chunks instead of allocating per block.
     std::vector<std::uint8_t> logical;
-    std::vector<std::uint8_t> raw_slice;
-    std::size_t copied=0;
-    while (copied<length) {
-        const std::uint64_t file_at=offset+copied;
-        const std::uint64_t chunk_index=file_at/chunk_size;
-        const std::size_t in_chunk=static_cast<std::size_t>(file_at%chunk_size);
+    bool raw_single=false;  // set after a failed RAW run read
+    RawPiece pieces[max_raw_run];  // built once per call, refilled per run
+    while (done<length) {
+        // RAW blocks have no other cancellation point.
+        if (done) { st=check_cancelled(); if (!st) return st; }
+        const std::uint64_t file_at=offset+done;
+        const std::uint64_t chunk_index=file_at>>file.chunk_log2;
+        const std::size_t in_chunk=static_cast<std::size_t>(file_at&(chunk_size-1));
         const auto block_id=block_refs_[file.first+static_cast<std::uint32_t>(chunk_index)];
+        std::uint8_t* const target=destination+done;
         Block block;
         st=block_record(block_id,block); if (!st) return st;
         if (block.codec==0) {
             // RAW: read and verify only the 16 KiB slices covering the request.
             // Bytes reach the caller only after their slices have verified.
             if (in_chunk>=block.logical) return fail(ErrorCode::format,"file offset maps outside RAW block");
-            const auto amount=std::min<std::size_t>(length-copied,block.logical-in_chunk);
+            const auto amount=std::min<std::size_t>(length-done,block.logical-in_chunk);
             if (options_.verify_read_blocks) {
-                const std::size_t first_slice=in_chunk/check_size, begin=first_slice*check_size;
-                const std::size_t end=std::min<std::size_t>(block.logical,static_cast<std::size_t>(align_up(in_chunk+amount,check_size)));
-                const std::size_t span=end-begin;
-                stored.reserve(span);
-                if (!read(block.offset+begin,stored.bytes.get(),span)) return fail(ErrorCode::io,"failed to read RAW block slice");
-                if (block_cache_) { std::lock_guard<std::mutex> lock(block_cache_->mutex); ++block_cache_->stats.raw_reads; block_cache_->stats.stored_bytes_read+=span; }
-                st=verify_slices(block,stored.bytes.get(),first_slice,span); if (!st) return st;
-                std::memcpy(destination+copied,stored.bytes.get()+(in_chunk-begin),amount);
-            } else {
-                std::uint8_t* target=destination+copied;
-                if (!needs_staging) {
-                    raw_slice.resize(amount);
-                    target=raw_slice.data();
+                // A run of RAW blocks stored back to back is fetched with one
+                // source read (at most raw_run_bytes), then each block is
+                // verified slice by slice and committed in file order. A run
+                // only holds whole 16 KiB slices of the request, so it is read
+                // straight into the output; unaligned edges go through scratch.
+                std::size_t count=0, run_bytes=0, covered=done;
+                auto add=[&](const Block& b,std::size_t at) {
+                    auto& piece=pieces[count++];
+                    piece.block=b; piece.in_chunk=at;
+                    piece.amount=std::min<std::size_t>(length-covered,b.logical-at);
+                    piece.begin=at/check_size*check_size;
+                    piece.span=std::min<std::size_t>(b.logical,static_cast<std::size_t>(align_up(at+piece.amount,check_size)))-piece.begin;
+                    run_bytes+=piece.span; covered+=piece.amount;
+                };
+                add(block,in_chunk);
+                // Atomic single-block reads never write the caller buffer before
+                // verification. Partial reads may: on failure they zero every
+                // byte they wrote past the verified prefix.
+                const bool direct=sink!=Sink::caller && pieces[0].begin==pieces[0].in_chunk &&
+                                  pieces[0].span==pieces[0].amount;
+                while (direct && !raw_single && covered<length && count<max_raw_run) {
+                    const auto& last=pieces[count-1];
+                    if (last.in_chunk+last.amount!=last.block.logical) break;
+                    const auto next_index=file.first+static_cast<std::uint32_t>((offset+covered)>>file.chunk_log2);
+                    Block next;
+                    if (!block_record(block_refs_[next_index],next) || next.codec!=0 ||
+                        next.offset!=last.block.offset+last.block.logical) break;
+                    const auto next_amount=std::min<std::size_t>(length-covered,next.logical);
+                    // A trailing partial slice is read on its own, through scratch.
+                    if (next_amount!=next.logical && next_amount%check_size) break;
+                    if (run_bytes+next_amount>raw_run_bytes) break;
+                    add(next,0);
                 }
-                if (!read(block.offset+in_chunk,target,amount))
+                std::uint8_t* bytes=target;
+                if (!direct) { stored.reserve(run_bytes); bytes=stored.bytes.get(); }
+                const auto scrub=[&] { if (direct && sink==Sink::partial) std::memset(destination+done,0,covered-done); };
+                if (!read(block.offset+pieces[0].begin,bytes,run_bytes)) {
+                    scrub();
+                    // Retry block by block so a partial read keeps an exact prefix.
+                    if (count>1) { raw_single=true; continue; }
                     return fail(ErrorCode::io,"failed to read RAW block slice");
-                if (!needs_staging) std::memcpy(destination+copied,raw_slice.data(),amount);
+                }
+                if (block_cache_) {
+                    block_cache_->raw_reads.fetch_add(1,std::memory_order_relaxed);
+                    block_cache_->raw_bytes.fetch_add(run_bytes,std::memory_order_relaxed);
+                }
+                for (std::size_t i=0;i<count;++i) {
+                    if (i) { st=check_cancelled(); if (!st) { scrub(); return st; } }
+                    const auto& piece=pieces[i];
+                    std::uint8_t* const out=destination+done;
+                    std::size_t verified=0;
+                    st=verify_slices(piece.block,bytes,piece.begin/check_size,piece.span,sink==Sink::partial ? &verified : nullptr);
+                    if (!st) {
+                        // Partial reads keep the verified slices in front of the bad one.
+                        if (sink==Sink::partial && piece.begin+verified>piece.in_chunk) {
+                            const auto good=std::min(piece.amount,piece.begin+verified-piece.in_chunk);
+                            if (!direct) std::memcpy(out,bytes+(piece.in_chunk-piece.begin),good);
+                            done+=good;
+                        }
+                        scrub();
+                        return st;
+                    }
+                    if (!direct) std::memcpy(out,bytes+(piece.in_chunk-piece.begin),piece.amount);
+                    done+=piece.amount;
+                    bytes+=piece.span;
+                }
+                continue;
+            } else {
+                // Scratch keeps caller output intact if the source fails midway.
+                std::uint8_t* bytes=target;
+                if (sink!=Sink::staging) { stored.reserve(amount); bytes=stored.bytes.get(); }
+                if (!read(block.offset+in_chunk,bytes,amount)) return fail(ErrorCode::io,"failed to read RAW block slice");
+                if (sink!=Sink::staging) std::memcpy(target,bytes,amount);
+                done+=amount;
+                continue;
             }
-            copied+=amount;
-            continue;
         }
         // Zstandard: decode the whole frame; decoded blocks may be cached.
         if (options_.verify_read_blocks && block_cache_) {
             std::size_t amount = 0;
-            st=read_cached_slice(block_id,in_chunk,length-copied,destination+copied,amount,stored);
+            st=read_cached_slice(block_id,in_chunk,length-done,target,amount,stored);
             if (!st) return st;
-            copied+=amount;
+            done+=amount;
             continue;
         }
         st=load_block(block_id,options_.verify_read_blocks,logical,&block,&stored); if (!st) return st;
         st=check_cancelled(); if (!st) return st;
         if (in_chunk>=logical.size()) return fail(ErrorCode::format,"file offset maps outside decoded block");
-        const auto amount=std::min(length-copied,logical.size()-in_chunk);
-        std::memcpy(destination+copied,logical.data()+in_chunk,amount);
-        copied+=amount;
-    }
-    if (needs_staging) {
-#if defined(NX_READER_DIAGNOSTICS)
-        const auto start=options_.collect_read_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-#endif
-        std::memcpy(output,staging.data(),length);
-#if defined(NX_READER_DIAGNOSTICS)
-        if (options_.collect_read_timing && block_cache_) {
-            const auto ns=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count();
-            std::lock_guard<std::mutex> lock(block_cache_->mutex); block_cache_->stats.copy_ns+=static_cast<std::uint64_t>(ns);
-        }
-#endif
+        const auto amount=std::min(length-done,logical.size()-in_chunk);
+        std::memcpy(target,logical.data()+in_chunk,amount);
+        done+=amount;
     }
     return ok_status();
 }
@@ -1950,7 +2122,7 @@ inline Status Archive::decode_block_record(const std::uint8_t* row, Block& block
 // `bytes` holds `size` logical bytes starting at slice `first_slice`; the run
 // ends on a slice boundary or at the block end.
 inline Status Archive::verify_slices(const Block& block, const std::uint8_t* bytes,
-                                     std::size_t first_slice, std::size_t size) const {
+                                     std::size_t first_slice, std::size_t size, std::size_t* verified) const {
 #if defined(NX_READER_DIAGNOSTICS)
     const auto hash_start=options_.collect_read_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 #endif
@@ -1963,12 +2135,18 @@ inline Status Archive::verify_slices(const Block& block, const std::uint8_t* byt
         for (; size-at>=8*check_size; at+=8*check_size, k+=8) {
             x8(bytes+at,check_size,got);
             for (std::size_t j=0; j<8; ++j)
-                if (got[j]!=u32(table+(k+j)*4)) return fail(ErrorCode::integrity,"block slice CRC-32C mismatch");
+                if (got[j]!=u32(table+(k+j)*4)) {
+                    if (verified) *verified=at+j*check_size;
+                    return fail(ErrorCode::integrity,"block slice CRC-32C mismatch");
+                }
         }
     }
     for (; at<size; at+=check_size, ++k) {
         const auto n=std::min(check_size,size-at);
-        if (crc32c(bytes+at,n)!=u32(table+k*4)) return fail(ErrorCode::integrity,"block slice CRC-32C mismatch");
+        if (crc32c(bytes+at,n)!=u32(table+k*4)) {
+            if (verified) *verified=at;
+            return fail(ErrorCode::integrity,"block slice CRC-32C mismatch");
+        }
     }
 #if defined(NX_READER_DIAGNOSTICS)
     if (options_.collect_read_timing && block_cache_) {
@@ -1983,8 +2161,10 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
                                                 std::uint8_t* output, std::size_t& copied, ReadBuffer& stored) const {
     auto status=check_cancelled(); if (!status) return status;
     auto& cache=*block_cache_;
-    const auto copy=[&](auto entry) -> Status {
-        const auto& bytes=entry->second.bytes;
+    // Copies outside the LRU lock from a pinned block.
+    const auto copy=[&](const BlockBytes& pinned) -> Status {
+        struct Unpin { BlockData& data; ~Unpin() { data.pins.fetch_sub(1,std::memory_order_release); } } unpin{*pinned};
+        const auto& bytes=pinned->bytes;
         if (offset>=bytes.size()) return fail(ErrorCode::format,"file offset maps outside cached block");
         copied=std::min(wanted,bytes.size()-offset);
 #if defined(NX_READER_DIAGNOSTICS)
@@ -1992,50 +2172,79 @@ inline Status Archive::read_cached_slice(std::uint32_t id, std::size_t offset, s
 #endif
         std::memcpy(output,bytes.data()+offset,copied);
 #if defined(NX_READER_DIAGNOSTICS)
-        if (options_.collect_read_timing) cache.stats.copy_ns+=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-copy_start).count());
+        if (options_.collect_read_timing) {
+            const auto ns=static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-copy_start).count());
+            std::lock_guard<std::mutex> lock(cache.mutex); cache.stats.copy_ns+=ns;
+        }
 #endif
-        cache.lru.splice(cache.lru.end(),cache.lru,entry->second.position);
         return ok_status();
     };
-    {
+    // Under the lock: find, refresh the LRU position and pin.
+    const auto pin=[&](bool coalesced) -> BlockBytes {
         std::lock_guard<std::mutex> lock(cache.mutex);
         auto hit=cache.entries.find(id);
-        if (hit!=cache.entries.end()) { ++cache.stats.hits; return copy(hit); }
-        ++cache.stats.misses;
-    }
+        if (hit==cache.entries.end()) { if (!coalesced) ++cache.stats.misses; return {}; }
+        ++cache.stats.hits; if (coalesced) ++cache.stats.coalesced;
+        cache.lru.splice(cache.lru.end(),cache.lru,hit->second.position);
+        hit->second.bytes->pins.fetch_add(1,std::memory_order_relaxed);
+        return hit->second.bytes;
+    };
+    if (auto pinned=pin(false)) return copy(pinned);
     std::unique_lock<std::mutex> loading(cache.loads[id%cache.loads.size()],std::defer_lock);
     if (!loading.try_lock()) {
         { std::lock_guard<std::mutex> lock(cache.mutex); ++cache.stats.load_waits; }
         loading.lock();
     }
     status=check_cancelled(); if (!status) return status;
+    if (auto pinned=pin(true)) { loading.unlock(); return copy(pinned); }
+    std::vector<std::uint8_t> logical;
+    BlockBytes reuse;
     {
         std::lock_guard<std::mutex> lock(cache.mutex);
-        auto hit=cache.entries.find(id);
-        if (hit!=cache.entries.end()) { ++cache.stats.hits; ++cache.stats.coalesced; return copy(hit); }
+        reuse=std::move(cache.spare);
+        if (reuse) logical.swap(reuse->bytes);
     }
-    std::vector<std::uint8_t> logical;
-    { std::lock_guard<std::mutex> lock(cache.mutex); logical.swap(cache.spare); }
     status=load_block(id,true,logical,nullptr,&stored); if (!status) return status;
     status=check_cancelled(); if (!status) return status;
     if (offset>=logical.size()) return fail(ErrorCode::format,"file offset maps outside decoded block");
     if (options_.max_cached_blocks && logical.size()<=options_.max_cached_block_bytes) {
-        std::lock_guard<std::mutex> lock(cache.mutex);
-        while (!cache.entries.empty() && (logical.size()>options_.max_cached_block_bytes-cache.bytes ||
-                                         cache.entries.size()>=options_.max_cached_blocks)) {
-            const auto victim=cache.lru.front();
-            auto& evicted=cache.entries.at(victim).bytes;
-            cache.bytes-=evicted.size();
-            if (evicted.capacity()>cache.spare.capacity()) cache.spare.swap(evicted);
-            cache.entries.erase(victim); cache.lru.pop_front(); ++cache.stats.evictions;
-        }
-        cache.lru.push_back(id);
-        try {
-            auto entry=cache.entries.emplace(id,CachedBlock{std::move(logical),std::prev(cache.lru.end())});
-            cache.bytes+=entry.first->second.bytes.size();
+        BlockBytes block;
+        if (reuse) { reuse->bytes.swap(logical); block=std::move(reuse); }
+        else { block=std::make_shared<BlockData>(); block->bytes=std::move(logical); }
+        block->pins.store(1,std::memory_order_relaxed);  // this reader's copy below
+        {
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            while (!cache.entries.empty() && (block->bytes.size()>options_.max_cached_block_bytes-cache.bytes ||
+                                             cache.entries.size()>=options_.max_cached_blocks)) {
+                const auto victim=cache.lru.front();
+                auto node=cache.entries.extract(victim);
+                auto& evicted=node.mapped().bytes;
+                cache.bytes-=evicted->bytes.size();
+                // Recycle the buffer only when no reader still holds it. New
+                // pins need this lock, so use_count() cannot grow meanwhile.
+                if (evicted.use_count()==1 && evicted->pins.load(std::memory_order_acquire)==0 &&
+                    (!cache.spare || evicted->bytes.capacity()>cache.spare->bytes.capacity())) cache.spare=std::move(evicted);
+                else evicted.reset();
+                cache.spare_node=std::move(node);
+                cache.spare_position.splice(cache.spare_position.end(),cache.lru,cache.lru.begin());
+                if (cache.spare_position.size()>1) cache.spare_position.pop_front();
+                ++cache.stats.evictions;
+            }
+            if (!cache.spare_position.empty()) cache.lru.splice(cache.lru.end(),cache.spare_position,cache.spare_position.begin());
+            else cache.lru.push_back(id);
+            cache.lru.back()=id;
+            try {
+                if (cache.spare_node) {
+                    auto node=std::move(cache.spare_node);
+                    node.key()=id; node.mapped()=CachedBlock{block,std::prev(cache.lru.end())};
+                    cache.entries.insert(std::move(node));
+                } else cache.entries.emplace(id,CachedBlock{block,std::prev(cache.lru.end())});
+            } catch (...) { cache.lru.pop_back(); throw; }
+            cache.bytes+=block->bytes.size();
             cache.stats.peak_bytes=std::max(cache.stats.peak_bytes,cache.bytes);
-            return copy(entry.first);
-        } catch (...) { cache.lru.pop_back(); throw; }
+        }
+        loading.unlock();
+        return copy(block);
     }
     copied=std::min(wanted,logical.size()-offset);
     std::memcpy(output,logical.data()+offset,copied);
@@ -2066,7 +2275,7 @@ inline Status Archive::load_block(std::uint32_t id, bool verify, std::vector<std
 #endif
     if (block.codec==0) {
         // RAW blocks need no intermediate compressed-data buffer or copy.
-        if (block_cache_) { std::lock_guard<std::mutex> lock(block_cache_->mutex); ++block_cache_->stats.raw_reads; }
+        if (block_cache_) block_cache_->raw_reads.fetch_add(1,std::memory_order_relaxed);
         start_io();
         if (!read(block.offset,logical.data(),logical.size()))
             return fail(ErrorCode::io,"failed to read RAW block payload");
