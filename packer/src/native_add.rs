@@ -79,7 +79,9 @@ pub(super) fn staged_input_memory(input: &ArchiveInput) -> u64 {
     fn media_bytes(media: &MediaInput) -> u64 {
         media.size.saturating_add(256)
     }
-    let mut bytes = 0u64;
+    let mut bytes = input.source_resources.iter().fold(0u64, |n, r| {
+        n.saturating_add(256 + directory_bytes(&r.root))
+    });
     for app in &input.applications {
         bytes = bytes.saturating_add(1024 + app.programs.len() as u64 * 256);
         for program in &app.programs {
@@ -168,18 +170,43 @@ pub fn add_native_contents(
     options: &WriterOptions,
     policy: IntegrityPolicy,
 ) -> Result<NativeAddStats, WriterError> {
+    add_native_contents_with_recipes(
+        source.as_ref(),
+        destination.as_ref(),
+        requests,
+        native_options,
+        options,
+        policy,
+        None,
+    )
+}
+
+/// `add_native_contents` that also keeps the recipes `recipes` makes from
+/// the staged archive, in the same generation: both are published or neither.
+pub(crate) fn add_native_contents_with_recipes(
+    source: &Path,
+    destination: &Path,
+    requests: &[NativeAddRequest],
+    native_options: &InventoryOptions,
+    options: &WriterOptions,
+    policy: IntegrityPolicy,
+    recipes: Option<DeferredRecipes<'_>>,
+) -> Result<NativeAddStats, WriterError> {
     if requests.is_empty() {
         return Err(invalid("native addition batch is empty"));
     }
     repack_inner(
-        source.as_ref(),
-        destination.as_ref(),
+        source,
+        destination,
         RepackPlan::new(),
         options,
         policy,
         Some((requests, native_options)),
         false,
-        &CatalogEdit::default(),
+        &CatalogEdit {
+            deferred: recipes,
+            ..CatalogEdit::default()
+        },
     )
 }
 
@@ -369,6 +396,7 @@ fn inspect_base(
         units: Vec::new(),
         metas: Vec::new(),
         tree: None,
+        system_update_bytes: None,
         issues: Vec::new(),
         bytes_read: 0,
     };
@@ -830,7 +858,13 @@ pub(super) fn prepare(
             target_snapshot_identity: required.snapshot.identity,
         }];
     }
-    Ok((ArchiveInput::new(vec![input]), inherited))
+    let mut input = ArchiveInput::new(vec![input]);
+    if options.preserve_firmware {
+        input.source_resources =
+            native::source_resources(&native_path, Platform::Switch1, key.1, &limits)
+                .map_err(|e| invalid(e.to_string()))?;
+    }
+    Ok((input, inherited))
 }
 
 #[allow(clippy::too_many_arguments)]

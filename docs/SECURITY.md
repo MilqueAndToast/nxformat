@@ -1,6 +1,6 @@
 # Parser and extraction security
 
-Applies to **NXFormat / NXConvert 1.0.0**.
+Applies to **NXFormat / NXConvert 1.0.1**.
 
 NX archives are untrusted input. A reader must validate fields before allocation, mapping, indexing, decompression, or extraction. Failure returns a bounded error; it must not continue with partial or guessed structures.
 
@@ -14,10 +14,10 @@ NX archives are untrusted input. A reader must validate fields before allocation
 - Bound traversal depth and detect directory cycles. A directory node may be shared between snapshots, but within one snapshot it must not be reachable more than once. A file record must not appear at multiple paths within one snapshot.
 - Validate that every file's block count equals the ceiling of size divided by its declared block size; empty files have zero references and SHA-256 of the empty byte sequence. Every reference must name an existing block whose uncompressed length equals the expected chunk length.
 - Accept only RAW or one-frame Zstandard blocks. RAW stored and logical sizes must match. Zstandard blocks must have no dictionary, declare the expected decompressed size, use at most a 1 MiB window, contain exactly one complete frame and no trailing bytes, and produce no more than the declared logical size.
-- Validate media payload sizes and hashes before use. Media records are uncompressed in NXFormat 1.0.0; unknown media types may be retained/skipped only if their record is structurally valid.
+- Validate media payload sizes and hashes before use. Media records are uncompressed in NX 0.2 and 0.3; unknown media types may be retained/skipped only if their record is structurally valid.
 - During extraction, resolve the destination path beneath the chosen extraction root using filesystem-safe APIs. Do not concatenate unchecked archive strings into paths. Reject symlink traversal and destination-specific reserved names, path length limits, case collisions, and names the target filesystem cannot represent. Report these separately from archive path validity.
 
-## Normative resource limits for NXFormat 1.0.0
+## Normative resource limits for NX 0.2 and 0.3
 
 | Resource | Maximum |
 |---|---:|
@@ -32,10 +32,10 @@ NX archives are untrusted input. A reader must validate fields before allocation
 | Block count | `2^32` |
 | One file's block-reference count | `2^32-1` |
 | File logical size | `INT64_MAX` bytes, also constrained by its block count and chunk size |
-| Directory depth | 1,024 |
+| Directory depth | 256 |
 | Zstandard window / decoded block | 1 MiB |
 
-These are format rejection limits, not suggestions. Implementations may impose lower per-mount budgets and return a resource-limit error. They must not raise the limits above these values in NXFormat 1.0.0. The reader must budget index storage before allocation. The reference reader captures and authenticates both index tables under max_index_bytes; implementations using paging must provide equivalent stable integrity. Backing sources must remain immutable for the Archive lifetime. A default mount budget should cap concurrently decoded block buffers (recommended initial cap: 8 MiB total); this is an implementation setting, not a cache design mandate.
+These are format rejection limits, not suggestions. Implementations may impose lower per-mount budgets and return a resource-limit error. They must not raise the limits above these values in NX 0.2 and 0.3. The reader must budget index storage before allocation. The reference reader captures and authenticates both index tables under max_index_bytes; implementations using paging must provide equivalent stable integrity. Backing sources must remain immutable for the Archive lifetime. A default mount budget should cap concurrently decoded block buffers (recommended initial cap: 8 MiB total); this is an implementation setting, not a cache design mandate.
 
 ## Error behavior
 
@@ -45,7 +45,7 @@ Fast Catalog validation checks the header CRC, Catalog range/hash, catalog limit
 
 ## Integrity limits
 
-SHA-256 and CRC detect accidental or malicious modification only when the relevant trusted digest remains unchanged. Since an attacker can replace the archive header and its CRC, NXFormat 1.0.0 provides no signature, key management, or authenticity. Do not treat the format as proof of publisher origin.
+SHA-256 and CRC detect accidental or malicious modification only when the relevant trusted digest remains unchanged. Since an attacker can replace the archive header and its CRC, NX provides no signature, key management, or authenticity. Do not treat the format as proof of publisher origin.
 
 ## Decrypted-source import boundary
 
@@ -84,3 +84,14 @@ Historical producers that shifted these IDs by one can yield incorrect display
 titles, publishers or versions; `check-nup` checks paths, NACP and file bytes,
 not every display TLV. Review display metadata when migrating such archives.
 These display values do not establish execution identity.
+
+## Independent source resources (NX 0.3)
+
+Source Resource descriptors are authenticated by the Catalog digest and contain
+only bounded Manifest directory references. Total resources are limited to 4096.
+Roots are independent flat file sets; invalid kinds, duplicate roots, repeated
+file IDs, references into game directory trees and out-of-range targets reject
+before exposing files. Kind 1 has exactly one `partition.hfs0` file. All files use
+the ordinary block decoder limits, slice checks and full-file SHA-256 validation.
+A resource kind is not evidence that native firmware is valid or installable.
+Source preservation never interprets unknown source bytes as game content.

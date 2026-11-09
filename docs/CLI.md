@@ -1,6 +1,6 @@
 # NXConvert commands and integration
 
-Applies to **NXFormat / NXConvert 1.0.0**.
+Applies to **NXFormat / NXConvert 1.0.1**.
 
 NXConvert is a native application and command-line tool. Start `nxconvert`
 without arguments to open the window; use `nxconvert --help` for the current
@@ -11,11 +11,11 @@ and executable, and `ffi/` exposes the same commands through a C API.
 
 ```text
 nxconvert scan SOURCE|FOLDER...
-nxconvert pack SOURCE... OUTPUT.nx [--no-recipe]
+nxconvert pack SOURCE... OUTPUT.nx [--no-recipe [--omit-firmware]]
 nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2]
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2
 nxconvert contents ARCHIVE.nx
-nxconvert add ARCHIVE.nx SOURCE... [--no-recipe]
+nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]]
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N]
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY...
 nxconvert compact ARCHIVE.nx [--no-compress]
@@ -38,8 +38,10 @@ the full manifest-based forms and options.
 
 `pack` and `add` keep a small reconstruction recipe inside the NX by default;
 `--no-recipe` skips it. The recipe is read while the conversion runs, and a
-recipe that cannot be kept is a warning: the NX is still written. Rebuilding
-requires the recipe and all referenced content; see [RECIPE.md](RECIPE.md).
+recipe that cannot be kept causes an error. A failed recipe leaves the destination
+of `pack` unchanged. With `add`, content groups already committed remain in the
+archive. Use `nxconvert recipe ARCHIVE.nx SOURCE...` to retry storing the recipes.
+Rebuilding requires the recipe and all referenced content; see [RECIPE.md](RECIPE.md).
 
 `verify` checks physical blocks, Media hashes and logical file hashes. With
 `PACKAGE RECEIPT`, it also compares extracted source bytes and provenance.
@@ -279,3 +281,32 @@ Origins are `unknown`, `declared`, `native-structure` or `derived`. The receipt 
 observations to manifest/native/base evidence; it is not signed or embedded in NX.
 `match_archive()` checks those bindings after edits. Loss of the receipt does not
 prevent the archive from serving its files and identities.
+
+## Firmware preservation (1.0.1)
+
+Native DXCI conversion retains its original system-update HFS0 in an independent
+Source Resource. `contents` reports it with `@RESOURCE` records
+(`application_id`, `kind`, `file_size`, `path`). Native firmware validity is the
+consumer's responsibility. Game snapshots and their identities are unchanged.
+
+```sh
+nxconvert pack game.dxci game.nx
+mkdir -p rebuilt-folder
+nxconvert rebuild game.nx rebuilt-folder
+# Save space explicitly; no byte-exact source reconstruction is promised:
+nxconvert pack game.dxci smaller.nx --omit-firmware --no-recipe
+```
+
+Firmware preservation and rebuild recipes are separate: `--no-recipe` alone
+keeps firmware. `--omit-firmware` requires `--no-recipe`, applies only to newly
+imported content, and does not silently strip resources already in an NX.
+
+**Reader compatibility.** An archive that holds a Source Resource is written as
+NX 0.3; every other archive stays NX 0.2. Readers from NXFormat 1.0.0, and the
+emulators built with them, reject NX 0.3, so a DXCI packed with default options
+opens only in readers from 1.0.1 or later. Update the emulator before sharing
+such archives, or pack with `--omit-firmware --no-recipe` to keep NX 0.2. The
+resource is mandatory (`flags=1`) on purpose: a 1.0.0 editor copies unknown
+optional extensions verbatim and would leave its directory index pointing at
+the wrong tree after a repack. One identical resource (same kind and files) is
+kept once per game, even when several sources carry it.

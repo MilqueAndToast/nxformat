@@ -324,8 +324,12 @@ static int sha_provider_tests(const std::string& raw_path, const std::string& co
     std::array<std::uint8_t, 16> unchanged{};
     unchanged.fill(0xa5);
     const auto corrupt_read = corrupt.read_file(0, "data.bin", 0, 4, unchanged.data(), unchanged.size());
-    if (corrupt_read || corrupt_read.error.code != nx::ErrorCode::integrity ||
-        !std::all_of(unchanged.begin(), unchanged.end(), [](std::uint8_t b) { return b == 0xa5; })) return 1;
+    // Failed bytes are untouched or zeroed by default reads, never unverified.
+    if (corrupt_read || corrupt_read.error.code != nx::ErrorCode::integrity || corrupt_read.bytes != 0 ||
+        !std::all_of(unchanged.begin(), unchanged.begin() + 4, [](std::uint8_t b) { return b == 0xa5 || b == 0; }) ||
+        !std::all_of(unchanged.begin() + 4, unchanged.end(), [](std::uint8_t b) { return b == 0xa5; })) {
+        std::cerr << "FAIL corrupted block exposed bytes or wrote past the request\n"; return 1;
+    }
     std::cout << "PASS callback SHA-256 standard digest, unused for block reads, corrupted-block CRC rejection, and synchronized concurrent reads\n";
     return 0;
 }
@@ -676,7 +680,9 @@ static int atomic_multiblock_read(const std::string& path) {
     if (index_offset > bytes.size() || bytes.size() - index_offset < 48) return 2;
     const std::uint64_t second_block_payload = read_u64(bytes.data() + index_offset + 24);
     FailPayloadSource source(bytes);
-    auto opened = nx::Archive::open(source);
+    nx::OpenOptions atomic_options;
+    atomic_options.atomic_reads = true;
+    auto opened = nx::Archive::open(source, atomic_options);
     if (!opened) { std::cerr << "FAIL atomic-read fixture open: " << opened.error.message << '\n'; return 1; }
     nx::Archive archive = std::move(*opened.value);
     if (!archive.mount()) { std::cerr << "FAIL atomic-read fixture mount\n"; return 1; }
@@ -689,7 +695,8 @@ static int atomic_multiblock_read(const std::string& path) {
     source.fail_reads_covering(second_block_payload);
     const auto failed = archive.read_file(resolved.value->id, 65534, output.size(), output.data(), output.size());
     source.disarm();
-    if (failed || failed.error.code != nx::ErrorCode::io || output != std::array<std::uint8_t, 3>{0xa5, 0x5a, 0xc3}) {
+    if (failed || failed.error.code != nx::ErrorCode::io || failed.bytes != 0 ||
+        output != std::array<std::uint8_t, 3>{0xa5, 0x5a, 0xc3}) {
         std::cerr << "FAIL later-block I/O error changed caller output or returned wrong status\n"; return 1;
     }
     const auto retried = archive.read_file(resolved.value->id, 65534, output.size(), output.data(), output.size());
@@ -698,13 +705,17 @@ static int atomic_multiblock_read(const std::string& path) {
         output[2] != static_cast<std::uint8_t>(((65536u * 31u + 7u) & 0xffu))) {
         std::cerr << "FAIL atomic-read retry returned wrong bytes\n"; return 1;
     }
-    // The partial mode keeps the verified first block and reports it exactly.
+    // The default (fast) mode keeps the verified first block and reports it exactly.
+    auto fast_open = nx::Archive::open(source);
+    if (!fast_open) return 1;
+    nx::Archive fast = std::move(*fast_open.value);
+    if (!fast.mount()) return 1;
     const auto expected_byte = [](std::uint64_t at) { return static_cast<std::uint8_t>((at * 31u + 7u) & 0xffu); };
     output = {0xa5, 0x5a, 0xc3};
     source.fail_reads_covering(second_block_payload);
-    const auto partial = archive.read_file_partial(resolved.value->id, 65534, output.size(), output.data(), output.size());
+    const auto partial = fast.read_file(resolved.value->id, 65534, output.size(), output.data(), output.size());
     source.disarm();
-    if (partial || partial.status.error.code != nx::ErrorCode::io || partial.bytes != 2 ||
+    if (partial || partial.error.code != nx::ErrorCode::io || partial.bytes != 2 ||
         output[0] != expected_byte(65534) || output[1] != expected_byte(65535) || (output[2] != 0xc3 && output[2] != 0)) {
         std::cerr << "FAIL partial read did not keep exactly the verified prefix after I/O failure\n"; return 1;
     }
@@ -712,7 +723,7 @@ static int atomic_multiblock_read(const std::string& path) {
     std::vector<std::uint8_t> range(static_cast<std::size_t>(std::min<std::uint64_t>(resolved.value->size, 3 * 65536)) - 100, 0);
     test_allocations.store(0, std::memory_order_relaxed);
     count_test_allocations.store(true, std::memory_order_relaxed);
-    const auto whole = archive.read_file_partial(resolved.value->id, 100, range.size(), range.data(), range.size());
+    const auto whole = fast.read_file(resolved.value->id, 100, range.size(), range.data(), range.size());
     count_test_allocations.store(false, std::memory_order_relaxed);
     if (!whole || whole.bytes != range.size() || test_allocations.load(std::memory_order_relaxed) > 1) {
         std::cerr << "FAIL partial multi-block read failed or allocated a staging buffer\n"; return 1;
@@ -926,8 +937,9 @@ int main(int argc,char** argv) {
             std::array<std::uint8_t,16> output{}; output.fill(0xa5);
             const auto length=static_cast<std::size_t>(file_info.value->size);
             const auto read=archive.read_file(file_info.value->id,0,length,output.data(),output.size());
-            if (read || read.error.code!=nx::ErrorCode::integrity ||
-                !std::all_of(output.begin(),output.begin()+static_cast<std::ptrdiff_t>(length),[](std::uint8_t b){return b==0xa5;})) {
+            // Default reads leave failed bytes untouched or zeroed, never unverified.
+            if (read || read.error.code!=nx::ErrorCode::integrity || read.bytes!=0 ||
+                !std::all_of(output.begin(),output.begin()+static_cast<std::ptrdiff_t>(length),[](std::uint8_t b){return b==0xa5 || b==0;})) {
                 std::cerr << "FAIL corrupt block was not rejected before modifying read output\n"; return 1;
             }
         }
@@ -971,7 +983,7 @@ int main(int argc,char** argv) {
         const auto raw_single_read = archive.read_file(enumerated_id, 0, bytes.size(), bytes.data(), bytes.size());
         count_test_allocations.store(false, std::memory_order_relaxed);
         if (!check(raw_single_read.ok() && bytes==std::array<std::uint8_t,4>{'N','X','!','?'}, "FileId random read mismatch") ||
-            !check(test_allocations.load(std::memory_order_relaxed) == 1, "single-block RAW read allocated more than its decoded block buffer")) return 1;
+            !check(test_allocations.load(std::memory_order_relaxed) == 0, "single-block RAW read allocated (the direct read needs no buffer)")) return 1;
         std::atomic<bool> concurrent_ok{true};
         std::array<std::thread, 4> readers;
         for (auto& thread : readers) thread = std::thread([&archive, &concurrent_ok, enumerated_id]() {

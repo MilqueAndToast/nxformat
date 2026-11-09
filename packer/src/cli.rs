@@ -114,18 +114,19 @@ nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2]\n\
 nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc]\n\
 nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
-nxconvert pack SOURCE.nsp|xci... OUTPUT.nx [--no-recipe] (decrypted DNSP/DXCI; keeps, inside the NX, a small recipe that rebuilds each source byte for byte; --no-recipe skips it)\n\
+nxconvert pack SOURCE... OUTPUT.nx [--no-recipe [--omit-firmware]] (decrypted DNSP/DXCI; keeps exact rebuild recipes by default)\n\
 nxconvert recipe ARCHIVE.nx SOURCE|RECIPE.nxrecipe... (keep rebuild recipes inside the NX)\n\
 nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...] (rebuild the original files into FOLDER)\n\
 nxconvert check-recipe ARCHIVE.nx (replay every recipe kept in the NX)\n\
 nxconvert scan SOURCE|FOLDER... (decrypted packages; @SOURCE, @CONTENT and @ISSUE lines)\n\
-nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
-nxconvert add ARCHIVE.nx SOURCE... [--no-recipe] (add updates and DLC in place, with their rebuild recipes unless --no-recipe)\n\
+nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @RESOURCE, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
+nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
 nxconvert compact ARCHIVE.nx [--no-compress] (rewrite as RAW to remove existing game-data compression)\n\
 nxconvert set-metadata ARCHIVE.nx APPLICATION_ID [title=TEXT] [publisher=TEXT] [icon=FILE.jpg|png] (in place; replaces the localized titles and icons)\n\
 --frontend (pack, pack-nup, pack-tree, add, add-tree, remove, compact, rebuild): @TOTAL and @PROGRESS lines (add the @TOTAL values); closing stdin cancels and leaves no partial file\n\
+--omit-firmware (native pack/add, requires --no-recipe): skip newly imported DXCI firmware; existing archive resources are preserved\n\
 --no-trail (pack-nup, automatic pack-tree, add-tree): write only the archive, without the .nximport, .assumptions.txt and .nxreceipt review files\n\
 nxconvert info ARCHIVE.nx\n\
 nxconvert verify ARCHIVE.nx [PACKAGE RECEIPT]\n\
@@ -153,6 +154,7 @@ struct Options {
     skip_dlc: bool,
     /// `--recipe` / `--no-recipe`; pack and add keep recipes unless told not to.
     recipe: Option<bool>,
+    omit_firmware: bool,
     /// Progress lines and cancel-on-stdin-close for a GUI frontend.
     frontend: bool,
     /// pack-nup, automatic pack-tree, add-tree: keep no declarations,
@@ -184,6 +186,10 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
         }
         if a == "--frontend" {
             o.frontend = true;
+            continue;
+        }
+        if a == "--omit-firmware" {
+            o.omit_firmware = true;
             continue;
         }
         if a == "--no-trail" {
@@ -1072,6 +1078,15 @@ fn print_contents(path: &Path, options: &WriterOptions) -> Result<(), Box<dyn st
         }
     }
     for a in &summary.applications {
+        for file in &a.source_files {
+            println!(
+                "@RESOURCE\t{:016x}\t{}\t{}\t{}",
+                a.application_id,
+                file.kind,
+                file.size,
+                field(&file.path)
+            );
+        }
         for bytes in &a.recipes {
             let info = recipe::recipe_info(bytes)?;
             println!(
@@ -1113,11 +1128,9 @@ fn keep_recipes(
             bytes
         };
         if total + bytes.len() as u64 > crate::MAX_EMBEDDED_RECIPE_BYTES / 2 {
-            println!(
-                "@NOTE\t{}\trebuild data too large to keep inside the NX",
-                field(&source.display().to_string())
+            return Err(
+                "rebuild data too large: exact source reconstruction cannot be guaranteed".into(),
             );
-            continue;
         }
         total += bytes.len() as u64;
         recipes.push(bytes);
@@ -1157,59 +1170,59 @@ impl RecipeScans {
         };
         Self { token, jobs }
     }
-    /// Keep the recipes inside `archive` in one edit. The NX is already
-    /// complete: a recipe that cannot be made or kept is only a warning.
-    fn keep(mut self, archive: &Path, options: &WriterOptions) {
-        if self.jobs.is_empty() {
-            return;
-        }
-        let warn = |source: &Path, why: &str| {
-            eprintln!("WARNING: no rebuild recipe for {}: {why}", source.display());
-            println!(
-                "@NOTE	{}	no rebuild recipe: {}",
-                field(&source.display().to_string()),
-                field(why)
-            );
-        };
-        let known = recipe::archive_digests(archive, options);
-        let mut recipes = Vec::new();
-        let mut total = 0u64;
+    /// Wait for every scan. A failed scan fails the command before it writes.
+    fn join(&mut self) -> Result<Vec<(PathBuf, recipe::SourceScan)>, Box<dyn std::error::Error>> {
+        let mut scans = Vec::with_capacity(self.jobs.len());
         for (source, job) in &mut self.jobs {
-            let scan = job.take().map(|j| {
-                j.join().unwrap_or_else(|_| {
-                    Err(crate::WriterError::new(
-                        crate::WriterErrorKind::InvalidInput,
-                        "recipe scan panicked",
-                    ))
-                })
-            });
-            let made = match (&known, scan) {
-                (Ok(known), Some(Ok(scan))) => {
-                    recipe::finish_recipe(&scan, known, options).map_err(|e| e.to_string())
-                }
-                (Err(e), _) => Err(e.to_string()),
-                (_, Some(Err(e))) => Err(e.to_string()),
-                (_, None) => continue,
-            };
-            match made {
-                Ok((bytes, stats)) => {
-                    if total + bytes.len() as u64 > crate::MAX_EMBEDDED_RECIPE_BYTES / 2 {
-                        warn(source, "rebuild data too large to keep inside the NX");
-                        continue;
-                    }
-                    print_recipe(source, &stats);
-                    total += bytes.len() as u64;
-                    recipes.push(bytes);
-                }
-                Err(e) => warn(source, &e),
-            }
+            let scan = job
+                .take()
+                .ok_or("missing recipe scan")?
+                .join()
+                .map_err(|_| "recipe scan panicked")??;
+            scans.push((source.clone(), scan));
         }
-        if !recipes.is_empty() {
-            if let Err(e) = recipe::embed_recipes(archive, recipes, options) {
-                warn(archive, &e.to_string());
-            }
-        }
+        Ok(scans)
     }
+    /// Requested reversibility is a contract: never warn and drop a recipe.
+    fn keep(
+        mut self,
+        archive: &Path,
+        options: &WriterOptions,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.jobs.is_empty() {
+            return Ok(());
+        }
+        let scans = self.join()?;
+        let known = recipe::archive_digests(archive, options)?;
+        let mut recipes = Vec::new();
+        for (source, bytes, stats) in finish_recipes(&scans, &known, options)? {
+            print_recipe(&source, &stats);
+            recipes.push(bytes);
+        }
+        recipe::embed_recipes(archive, recipes, options)?;
+        Ok(())
+    }
+}
+/// One recipe per scan against the archive's file set; all of them or an error.
+fn finish_recipes(
+    scans: &[(PathBuf, recipe::SourceScan)],
+    known: &std::collections::HashSet<(u64, [u8; 32])>,
+    options: &WriterOptions,
+) -> Result<Vec<(PathBuf, Vec<u8>, recipe::RecipeStats)>, crate::WriterError> {
+    let mut made = Vec::with_capacity(scans.len());
+    let mut total = 0u64;
+    for (source, scan) in scans {
+        let (bytes, stats) = recipe::finish_recipe(scan, known, options)?;
+        total += bytes.len() as u64;
+        if total > crate::MAX_EMBEDDED_RECIPE_BYTES / 2 {
+            return Err(crate::WriterError::new(
+                crate::WriterErrorKind::ResourceLimit,
+                "rebuild data too large: exact source reconstruction cannot be guaranteed",
+            ));
+        }
+        made.push((source.clone(), bytes, stats));
+    }
+    Ok(made)
 }
 impl Drop for RecipeScans {
     fn drop(&mut self) {
@@ -1374,6 +1387,7 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
     let mut options = WriterOptions::default();
     size_budgets(None, o, &mut limits, &mut options)?;
     options.cancellation = command_token(o);
+    options.preserve_firmware = !o.omit_firmware;
     let started = Instant::now();
     match (args[0].as_str(), args.len()) {
         ("pack", n) if n >= 3 => {
@@ -1389,10 +1403,35 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
             };
             let inv = inventory(&sources, &native)?;
             for issue in inv.all_issues() {
-                eprintln!("{issue:?}");
+                let level = match issue.severity {
+                    native::Severity::Info => "info",
+                    native::Severity::Warning => "warning",
+                    native::Severity::Error => "error",
+                };
+                match issue.source.and_then(|i| inv.sources.get(i)) {
+                    Some(s) => eprintln!("{level}: {}: {}", s.path.display(), issue.message),
+                    None => eprintln!("{level}: {}", issue.message),
+                }
             }
+            let parent = output
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let (stage_file, mut stage) =
+                crate::writer::unique_temp(parent, std::ffi::OsStr::new(".nx-pack"))?;
+            drop(stage_file);
             let watch = ProgressWatch::counter(o.frontend, &options.progress);
-            let stats = convert_inventory(&inv, output, &native, IntegrityPolicy::Fast, &options)?;
+            let stats =
+                convert_inventory(&inv, &stage.path, &native, IntegrityPolicy::Fast, &options)?;
+            recipes.keep(&stage.path, &options)?;
+            if options.cancellation.is_cancelled() {
+                return Err("conversion cancelled before publication".into());
+            }
+            // The recipes were appended as a new generation of the private
+            // stage: publish it as the only one.
+            crate::writer::seal_staged_generations(&stage.path, &options)?;
+            crate::writer::atomic_replace(&stage.path, output)?;
+            stage.disarm();
             drop(watch);
             println!(
                 "PASS sources={} source_bytes={} nx_bytes={} conversion_s={:.3}",
@@ -1404,7 +1443,6 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                 fs::metadata(output)?.len(),
                 stats.elapsed.as_secs_f64()
             );
-            recipes.keep(output, &options);
         }
         ("recipe", n) if n >= 3 => {
             let archive = Path::new(&args[1]);
@@ -1466,7 +1504,7 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
         ("add", n) if n >= 3 => {
             let archive = Path::new(&args[1]);
             let sources: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
-            let recipes = RecipeScans::start(&sources, o.recipe != Some(false), &options);
+            let mut recipes = RecipeScans::start(&sources, o.recipe != Some(false), &options);
             let native = InventoryOptions {
                 mode: InventoryMode::Strict,
                 ..InventoryOptions::default()
@@ -1592,18 +1630,51 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                 }
                 writes[usize::from(later)].push(item);
             }
+            // Recipes are made inside the last write, from its staged files,
+            // so that write publishes its content and its recipes, or neither.
+            let scans = recipes.join()?;
+            let owners: std::collections::HashMap<&Path, u64> = inv
+                .sources
+                .iter()
+                .filter_map(|s| {
+                    s.metas
+                        .iter()
+                        .find(|m| meta_kind(m.meta.meta_type).is_some())
+                        .map(|m| (s.path.as_path(), m.meta.application_id))
+                })
+                .collect();
+            let made = std::cell::RefCell::new(Vec::new());
+            let make = |known: &std::collections::HashSet<(u64, [u8; 32])>| {
+                let finished = finish_recipes(&scans, known, &options)?;
+                let mut out = Vec::with_capacity(finished.len());
+                for (source, bytes, _) in &finished {
+                    let owner = owners.get(source.as_path()).ok_or_else(|| {
+                        crate::WriterError::new(
+                            crate::WriterErrorKind::InvalidInput,
+                            "a rebuild recipe source names no game",
+                        )
+                    })?;
+                    out.push((Platform::Switch1, *owner, bytes.clone()));
+                }
+                *made.borrow_mut() = finished;
+                Ok(out)
+            };
+            let last = writes.iter().rposition(|w| !w.is_empty());
             // Each write adds its whole group in one new archive generation,
             // or nothing if any member fails.
-            for write in writes.iter().filter(|w| !w.is_empty()) {
+            for (index, write) in writes.iter().enumerate().filter(|(_, w)| !w.is_empty()) {
                 let requests: Vec<NativeAddRequest> =
                     write.iter().map(|(r, _, _)| r.clone()).collect();
-                add_native_contents(
+                let deferred: Option<crate::writer::DeferredRecipes> =
+                    (Some(index) == last && !scans.is_empty()).then_some(&make);
+                crate::writer::add_native_contents_with_recipes(
                     archive,
                     archive,
                     &requests,
                     &native,
                     &options,
                     IntegrityPolicy::Fast,
+                    deferred,
                 )?;
                 for (request, (kind, _, version), _) in write {
                     let title = request.title_id;
@@ -1611,8 +1682,8 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
                     added += 1;
                 }
             }
-            if added != 0 {
-                recipes.keep(archive, &options);
+            for (source, _, stats) in made.borrow().iter() {
+                print_recipe(source, stats);
             }
             if added == 0
                 && !inv.sources.iter().any(|s| {
@@ -1696,7 +1767,21 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if argv.len() == 1 && matches!(argv[0].as_str(), "--version" | "-V") {
+        println!("nxconvert {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let (mut args, o) = parse(argv)?;
+    if o.omit_firmware {
+        if !matches!(args.first().map(String::as_str), Some("pack" | "add")) {
+            return Err("--omit-firmware applies to native pack/add only".into());
+        }
+        if o.recipe != Some(false) {
+            return Err(
+                "--omit-firmware requires --no-recipe to skip exact source reconstruction".into(),
+            );
+        }
+    }
     let mut limits = import::ImportLimits::default();
     let mut options = WriterOptions::default();
     let mut measured = None;

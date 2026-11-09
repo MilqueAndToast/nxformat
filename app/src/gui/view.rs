@@ -128,6 +128,7 @@ impl App {
                     self.sources.clear();
                     self.textures.clear();
                     self.appearances.clear();
+                    self.omitted_firmware.clear();
                     self.focused.clear();
                 }
                 if theme::button(ui, Icon::Folder, "Folder", false).clicked() {
@@ -143,6 +144,7 @@ impl App {
         if !games.iter().any(|g| g.key == self.focused) {
             self.focused = games.first().map(|g| g.key.clone()).unwrap_or_default();
         }
+        let mut removed = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -177,28 +179,67 @@ impl App {
                             } else {
                                 theme::brand(ui, 56.0);
                             }
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(&game.name).size(18.0).strong());
-                                ui.label(
-                                    theme::muted(if game.tree {
-                                        "Extracted folder".into()
-                                    } else {
-                                        format!(
-                                            "{:016X} · {} source{}",
-                                            game.application,
-                                            game.sources.len(),
-                                            if game.sources.len() == 1 { "" } else { "s" }
-                                        )
-                                    })
-                                    .small(),
-                                );
-                            });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
+                                    let remove = ui
+                                        .add(
+                                            egui::Button::new("")
+                                                .fill(Color32::from_rgb(168, 40, 53))
+                                                .min_size(egui::vec2(34.0, 34.0)),
+                                        )
+                                        .on_hover_text("Remove this game from the list");
+                                    remove.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            true,
+                                            "Remove this game from the list",
+                                        )
+                                    });
+                                    theme::paint_icon(
+                                        ui.painter(),
+                                        egui::Rect::from_center_size(
+                                            remove.rect.center(),
+                                            egui::Vec2::splat(18.0),
+                                        ),
+                                        Icon::Trash,
+                                        Color32::WHITE,
+                                    );
+                                    if remove.clicked() {
+                                        removed = Some(game);
+                                    }
                                     if ui.selectable_label(focused, "Configure").clicked() {
                                         self.focused = game.key.clone();
                                     }
+                                    ui.with_layout(
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&game.name).size(18.0).strong(),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(&game.name);
+                                            ui.label(
+                                                theme::muted(if game.tree {
+                                                    "Extracted folder".into()
+                                                } else {
+                                                    format!(
+                                                        "{:016X} · {} source{}",
+                                                        game.application,
+                                                        game.sources.len(),
+                                                        if game.sources.len() == 1 {
+                                                            ""
+                                                        } else {
+                                                            "s"
+                                                        }
+                                                    )
+                                                })
+                                                .small(),
+                                            );
+                                        },
+                                    );
                                 },
                             );
                         });
@@ -240,6 +281,35 @@ impl App {
                                 ui.colored_label(ui.visuals().warn_fg_color, &source.issue);
                             }
                         }
+                        let firmware_bytes = self.firmware_bytes(game);
+                        if firmware_bytes != 0 {
+                            let mut include = !self.omits_firmware(game);
+                            if ui.add_enabled(
+                                self.include_firmware,
+                                egui::Checkbox::new(&mut include, format!("Bundled firmware · {}", bytes(firmware_bytes))),
+                            )
+                            .on_disabled_hover_text("Enable bundled firmware in Configuration to include it.")
+                            .on_hover_text("Keep the system-update partition. Omitting it skips exact reconstruction for this game.")
+                            .changed() {
+                                if include {
+                                    self.omitted_firmware.remove(&game.key);
+                                } else {
+                                    self.omitted_firmware.insert(game.key.clone());
+                                }
+                            }
+                            ui.label(
+                                theme::muted(if self.omits_firmware(game) {
+                                    if self.recipe {
+                                        "Without firmware this game gets no rebuild data."
+                                    } else {
+                                        "Firmware omitted."
+                                    }
+                                } else {
+                                    "With firmware the NX needs an emulator built with NXFormat 1.0.1 or later."
+                                })
+                                .small(),
+                            );
+                        }
                         ui.add_space(6.0);
                         if let Some(output) = &game.output {
                             ui.add(
@@ -269,6 +339,9 @@ impl App {
                     });
                 }
             });
+        if let Some(game) = removed {
+            self.remove_game(game);
+        }
     }
 
     fn configuration(&mut self, ui: &mut egui::Ui) {
@@ -287,22 +360,30 @@ impl App {
                 ui.strong("Compression");
                 theme::info(
                     ui,
-                    &["Compression", "Non: store game data without compression.", "Small / Balanced / Maximum: increasing compression effort.", "Balanced is recommended for most games."],
+                    &["Compression", "None: store game data without compression.", "Small / Balanced / Maximum: increasing compression effort.", "Balanced is recommended for most games."],
                 );
             });
-            ui.horizontal_wrapped(|ui| {
-                if ui.selectable_label(self.no_compress,"Non").clicked(){self.no_compress=true;}
+            ui.horizontal(|ui| {
+                if ui.selectable_label(self.no_compress,"None").clicked(){self.no_compress=true;}
                 for (level,label) in [(1,"Small"),(3,"Balanced"),(13,"Maximum")] {
                     if ui.selectable_label(!self.no_compress && self.level==level,label).clicked(){self.no_compress=false;self.level=level;}
                 }
             });
             ui.label(theme::muted("Balanced is recommended for most games.").small());
-            egui::CollapsingHeader::new("Advanced").show(ui,|ui|{ui.add_enabled(!self.no_compress,egui::Slider::new(&mut self.level,1..=13).text("Level"));});
             let games=self.games();
             let has_trees=games.iter().any(|g|g.tree);
-            let has_packages=games.iter().any(|g|!g.tree);
+            // Rebuild data and firmware exist only for DNSP/DXCI packages.
+            let has_packages=games.iter().any(|g|self.native_package(g));
+            if games.iter().any(|game| self.firmware_bytes(game) != 0) {
+                ui.checkbox(&mut self.include_firmware, "Include bundled firmware")
+                    .on_hover_text("Allow bundled firmware for all games. Choose which games include it in Sources.");
+            }
             if has_packages {
-                ui.checkbox(&mut self.recipe,"Keep original rebuild data").on_hover_text("Keep a small recipe inside the NX to rebuild native package files byte for byte.");
+                ui.checkbox(&mut self.recipe, "Keep original rebuild data")
+                    .on_hover_text("Keep a recipe to rebuild native package files byte for byte.");
+                if self.recipe && games.iter().any(|game| self.omits_firmware(game)) {
+                    ui.label(theme::muted("Rebuild data is skipped for games whose firmware is omitted.").small());
+                }
             }
             if has_trees {
                 ui.add_space(10.0);ui.strong("Extracted folder platform");
@@ -627,7 +708,7 @@ impl eframe::App for App {
         let busy = self.busy();
         if !busy && self.archive.is_none() && !self.sources.is_empty() {
             egui::Panel::right("configuration")
-                .exact_size(304.0)
+                .exact_size(356.0)
                 .resizable(false)
                 .frame(egui::Frame::NONE.fill(theme::CARD).inner_margin(20))
                 .show(ui, |ui| {

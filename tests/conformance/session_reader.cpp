@@ -35,12 +35,15 @@ struct Decoder {
     }
 };
 struct Opened { std::shared_ptr<nx::DiskSource> source; std::shared_ptr<nx::Session> session; nx::FileId file; };
-Opened open(const std::filesystem::path& path,Decoder& decoder,bool prefetch=false,uint64_t cache=64*1024*1024,unsigned ahead=1,bool timing=false,bool atomic=false) {
+// One decode worker by default: the queue/cancellation tests count jobs that
+// a single worker leaves queued. split() covers the pool.
+Opened open(const std::filesystem::path& path,Decoder& decoder,bool prefetch=false,uint64_t cache=64*1024*1024,unsigned ahead=1,bool timing=false,bool atomic=false,unsigned workers=1) {
     auto source=nx::DiskSource::open(path); check(bool(source),"disk open");
     nx::SessionOptions options; options.sequential_prefetch=prefetch; options.lookahead_blocks=ahead;
+    options.decode_workers=workers;
     options.reader.zstd=&Decoder::decode; options.reader.zstd_context=&decoder;
     options.reader.max_cached_block_bytes=cache;
-    options.reader.collect_read_timing=timing; options.atomic_reads=atomic;
+    options.reader.collect_read_timing=timing; options.reader.atomic_reads=atomic;
     auto session=nx::Session::open(*source.value,options); check(bool(session),"session open/mount");
     auto info=(*session.value)->archive().resolve_file(0,"data.bin"); check(bool(info),"resolve once");
     return {*source.value,*session.value,info.value->id};
@@ -149,6 +152,12 @@ void split(const std::filesystem::path& zstd,const std::filesystem::path& raw) {
     check(decoder.peak>1,"split read did not decode in parallel");
     read(s,100*1024,4*256*1024);
     check(s.session->stats().prefetch_submitted==2,"cached blocks resubmitted");
+    // Four workers: the caller keeps block 0, the pool decodes 1..4 at once.
+    Decoder pooled; pooled.delay=20; auto p=open(zstd,pooled,false,64*1024*1024,1,false,false,4);
+    read(p,100*1024,4*256*1024);
+    const auto pool_stats=p.session->stats();
+    check(pool_stats.prefetch_submitted==4 && pool_stats.cache.decompressions==5,"pooled split read work");
+    check(pooled.peak>2,"pooled split read did not use several workers");
     Decoder unused; auto r=open(raw,unused,true); auto rc=std::make_shared<nx::ReadCursor>();
     read(r,100*1024,4*256*1024);
     for (unsigned i=0;i<4;++i) read(r,uint64_t(i)*4096,4096,rc);
@@ -223,7 +232,7 @@ void io_failure(const std::filesystem::path& path) {
     Decoder decoder;
     auto disk=nx::DiskSource::open(path); check(bool(disk),"I/O disk open");
     auto source=std::make_shared<FailingSource>(); source->source=*disk.value;
-    nx::SessionOptions options; options.sequential_prefetch=false; options.atomic_reads=true;
+    nx::SessionOptions options; options.sequential_prefetch=false; options.reader.atomic_reads=true;
     options.reader.zstd=&Decoder::decode; options.reader.zstd_context=&decoder;
     auto opened=nx::Session::open(source,options); check(bool(opened),"I/O session open");
     auto session=*opened.value; auto file=session->archive().resolve_file(0,"data.bin"); check(bool(file),"I/O resolve");
@@ -297,7 +306,7 @@ size_t vfs_read(nx::Session& session,nx::FileId file,uint64_t at,uint8_t* output
     size_t done=0;
     while (done<length) {
         const auto part=static_cast<size_t>(std::min<uint64_t>(length-done,session.max_read_bytes()));
-        const auto result=session.read_partial(file,at+done,part,output+done,part);
+        const auto result=session.read(file,at+done,part,output+done,part);
         done+=result.bytes;
         if (!result) break;
     }
@@ -312,21 +321,21 @@ void partial_equivalence(const std::filesystem::path& path) {
         const uint64_t at=next()%size;
         const size_t n=static_cast<size_t>(std::min<uint64_t>(size-at,next()%(3*block_size)+1));
         std::vector<uint8_t> partial(n,0xee),atomic(n,0xee);
-        const auto result=s.session->read_partial(s.file,at,n,partial.data(),n);
-        check(bool(result) && result.bytes==n && result.status.ok(),"partial read failed");
+        const auto result=s.session->read(s.file,at,n,partial.data(),n);
+        check(bool(result) && result.bytes==n && result.ok(),"partial read failed");
         check(bool(s.session->read(s.file,at,n,atomic.data(),n)),"atomic read failed");
         check(partial==atomic,"partial and atomic reads differ");
         check_prefix(partial,at,n,"partial read bytes");
     }
     // Zero length, invalid arguments and EOF: no bytes, output untouched.
     std::vector<uint8_t> out(32,0xee);
-    auto empty=s.session->read_partial(s.file,size,0,out.data(),out.size());
+    auto empty=s.session->read(s.file,size,0,out.data(),out.size());
     check(bool(empty) && empty.bytes==0,"empty partial read");
-    auto eof=s.session->read_partial(s.file,size,1,out.data(),out.size());
-    check(!eof && eof.bytes==0 && eof.status.error.code==nx::ErrorCode::bounds,"past-EOF partial read");
-    auto undersized=s.session->read_partial(s.file,0,out.size(),out.data(),out.size()-1);
-    check(!undersized && undersized.bytes==0 && undersized.status.error.code==nx::ErrorCode::resource_limit,"short output accepted");
-    auto huge=s.session->read_partial(s.file,0,s.session->max_read_bytes()+1,out.data(),~size_t{0});
+    auto eof=s.session->read(s.file,size,1,out.data(),out.size());
+    check(!eof && eof.bytes==0 && eof.error.code==nx::ErrorCode::bounds,"past-EOF partial read");
+    auto undersized=s.session->read(s.file,0,out.size(),out.data(),out.size()-1);
+    check(!undersized && undersized.bytes==0 && undersized.error.code==nx::ErrorCode::resource_limit,"short output accepted");
+    auto huge=s.session->read(s.file,0,s.session->max_read_bytes()+1,out.data(),~size_t{0});
     check(!huge && huge.bytes==0,"read limit ignored");
     check(std::all_of(out.begin(),out.end(),[](auto b){return b==0xee;}),"invalid partial read changed output");
     // A VFS-style loop returns the whole file in max_read_bytes calls.
@@ -338,22 +347,24 @@ void partial_equivalence(const std::filesystem::path& path) {
 void partial_corrupt(const std::filesystem::path& first_slice,const std::filesystem::path& mid_slice) {
     Decoder decoder; auto s=open(first_slice,decoder);
     std::vector<uint8_t> out(2*block_size,0xee);
-    auto result=s.session->read_partial(s.file,100,out.size(),out.data(),out.size());
-    check(!result && result.status.error.code==nx::ErrorCode::integrity && result.bytes==block_size-100,"block prefix count");
+    auto result=s.session->read(s.file,100,out.size(),out.data(),out.size());
+    check(!result && result.error.code==nx::ErrorCode::integrity && result.bytes==block_size-100,"block prefix count");
     check_prefix(out,100,result.bytes,"corrupt block prefix");
     // Reading from inside the bad block returns nothing.
     std::fill(out.begin(),out.end(),uint8_t{0xee});
-    result=s.session->read_partial(s.file,block_size+8,4096,out.data(),out.size());
+    result=s.session->read(s.file,block_size+8,4096,out.data(),out.size());
     check(!result && result.bytes==0 && out[0]==0xee,"bad slice exposed");
-    Decoder mid_decoder; auto m=open(mid_slice,mid_decoder,false,64*1024*1024,1,false,true);
+    Decoder mid_decoder; auto m=open(mid_slice,mid_decoder);
     std::fill(out.begin(),out.end(),uint8_t{0xee});
-    result=m.session->read_partial(m.file,100,out.size(),out.data(),out.size());
-    check(!result && result.status.error.code==nx::ErrorCode::integrity && result.bytes==block_size-100+5*16*1024,"slice prefix count");
+    result=m.session->read(m.file,100,out.size(),out.data(),out.size());
+    check(!result && result.error.code==nx::ErrorCode::integrity && result.bytes==block_size-100+5*16*1024,"slice prefix count");
     check_prefix(out,100,result.bytes,"corrupt slice prefix");
-    // The atomic API keeps its guarantees on the same data, single block included.
+    // atomic_reads keeps its guarantees on the same data, single block included.
+    Decoder atomic_decoder; auto a=open(mid_slice,atomic_decoder,false,64*1024*1024,1,false,true);
     std::fill(out.begin(),out.end(),uint8_t{0xee});
-    check(!m.session->read(m.file,100,out.size(),out.data(),out.size()),"atomic corruption accepted");
-    check(!m.session->read(m.file,block_size,200*1024,out.data(),out.size()),"atomic single-block corruption accepted");
+    result=a.session->read(a.file,100,out.size(),out.data(),out.size());
+    check(!result && result.bytes==0,"atomic corruption accepted");
+    check(!a.session->read(a.file,block_size,200*1024,out.data(),out.size()),"atomic single-block corruption accepted");
     check(std::all_of(out.begin(),out.end(),[](auto b){return b==0xee;}),"atomic failure changed output");
     // VFS loop: the short count is exact and the bytes after it are untouched.
     std::vector<uint8_t> whole(4*1024*1024,0xee);
@@ -375,18 +386,18 @@ void partial_io_failure(const std::filesystem::path& path) {
     // the reader goes block by block, so the prefix is still exact.
     source->fail_above=block_size;
     source->successful_before_failure=2;
-    auto result=session->read_partial(file.value->id,0,range.size(),range.data(),range.size());
-    check(!result && result.status.error.code==nx::ErrorCode::io && result.bytes==2*block_size,"late I/O prefix count");
+    auto result=session->read(file.value->id,0,range.size(),range.data(),range.size());
+    check(!result && result.error.code==nx::ErrorCode::io && result.bytes==2*block_size,"late I/O prefix count");
     check_prefix(range,0,result.bytes,"late I/O prefix bytes");
     source->fail=true;
     std::fill(range.begin(),range.end(),uint8_t{0xee});
-    result=session->read_partial(file.value->id,10,range.size()-10,range.data(),range.size());
+    result=session->read(file.value->id,10,range.size()-10,range.data(),range.size());
     check(!result && result.bytes==0 && range[0]==0xee && range[0x9999]==0xee,"first-block I/O failure exposed bytes");
-    result=session->read_partial(file.value->id,0,range.size(),range.data(),range.size());
+    result=session->read(file.value->id,0,range.size(),range.data(),range.size());
     check(bool(result) && result.bytes==range.size(),"partial I/O block-by-block retry");
     source->fail_above=SIZE_MAX;
     std::fill(range.begin(),range.end(),uint8_t{0xee});
-    result=session->read_partial(file.value->id,0,range.size(),range.data(),range.size());
+    result=session->read(file.value->id,0,range.size(),range.data(),range.size());
     check(bool(result) && result.bytes==range.size(),"partial I/O retry");
     check_prefix(range,0,range.size(),"partial retry bytes");
 }
@@ -399,7 +410,7 @@ void partial_cancellation(const std::filesystem::path& path) {
     auto session=*opened.value; auto file=session->archive().resolve_file(0,"data.bin"); check(bool(file),"cancel resolve");
     std::vector<uint8_t> out(3*block_size,0xee);
     nx::PartialRead result;
-    std::thread reading([&] { result=session->read_partial(file.value->id,0,out.size(),out.data(),out.size()); });
+    std::thread reading([&] { result=session->read(file.value->id,0,out.size(),out.data(),out.size()); });
     {
         std::unique_lock<std::mutex> lock(decoder.mutex);
         if (!decoder.cv.wait_for(lock,5s,[&]{return decoder.entered;})) {
@@ -410,9 +421,9 @@ void partial_cancellation(const std::filesystem::path& path) {
     session->stop();
     { std::lock_guard<std::mutex> lock(decoder.mutex); decoder.hold=false; decoder.cv.notify_all(); }
     reading.join();
-    check(!result && result.status.error.code==nx::ErrorCode::cancelled && result.bytes==block_size,"cancel prefix count");
+    check(!result && result.error.code==nx::ErrorCode::cancelled && result.bytes==block_size,"cancel prefix count");
     check_prefix(out,0,result.bytes,"cancel prefix bytes");
-    auto after=session->read_partial(file.value->id,0,16,out.data(),out.size());
+    auto after=session->read(file.value->id,0,16,out.data(),out.size());
     check(!after && after.bytes==0,"read after stop");
 }
 // RAW multi-block reads must stop at the next block when cancelled.
@@ -437,8 +448,8 @@ void partial_raw_cancellation(const std::filesystem::path& path) {
     auto session=*opened.value; auto file=session->archive().resolve_file(0,"data.bin"); check(bool(file),"raw cancel resolve");
     std::vector<uint8_t> out(3*block_size,0xee);
     source->armed=true;  // the first payload read requests cancellation
-    auto result=session->read_partial(file.value->id,0,out.size(),out.data(),out.size());
-    check(!result && result.status.error.code==nx::ErrorCode::cancelled && result.bytes==block_size,"RAW cancellation between blocks");
+    auto result=session->read(file.value->id,0,out.size(),out.data(),out.size());
+    check(!result && result.error.code==nx::ErrorCode::cancelled && result.bytes==block_size,"RAW cancellation between blocks");
     check_prefix(out,0,result.bytes,"RAW cancellation bytes");
 }
 void partial_concurrent(const std::filesystem::path& path) {
@@ -450,7 +461,7 @@ void partial_concurrent(const std::filesystem::path& path) {
         for (unsigned i=0;i<40;++i) {
             const uint64_t at=(uint64_t(t)*977*1024+uint64_t(i)*300*1024)%(3*1024*1024);
             std::fill(out.begin(),out.end(),uint8_t{0xee});
-            const auto r=s.session->read_partial(s.file,at,out.size(),out.data(),out.size(),cursor);
+            const auto r=s.session->read(s.file,at,out.size(),out.data(),out.size(),cursor);
             if (!r || r.bytes!=out.size()) { ++errors; continue; }
             for (size_t k=0;k<out.size();k+=4093) if (out[k]!=expected(at+k)) { ++errors; break; }
         }
@@ -470,7 +481,7 @@ void eviction_stress(const std::filesystem::path& path) {
             state^=state<<13; state^=state>>17; state^=state<<5;
             const size_t n=1+state%out.size();
             const uint64_t at=state%(4*256*1024-n);
-            const auto r=s.session->read_partial(s.file,at,n,out.data(),out.size());
+            const auto r=s.session->read(s.file,at,n,out.data(),out.size());
             if (!r || r.bytes!=n) { ++errors; continue; }
             for (size_t k=0;k<n;++k) if (out[k]!=expected(at+k)) { ++errors; break; }
         }

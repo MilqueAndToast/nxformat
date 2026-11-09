@@ -5,7 +5,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/fab918/nxformat" height="20" align="top"></a>
   <a href="https://github.com/fab918/nxformat/actions/workflows/ci.yml"><img alt="Tests and conformance" src="https://github.com/fab918/nxformat/actions/workflows/ci.yml/badge.svg?branch=main" height="20" align="top"></a>
-  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.0"><img alt="NXFormat v1.0.0" src="https://img.shields.io/badge/release-v1.0.0-blue" height="20" align="top"></a>
+  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.1"><img alt="NXFormat v1.0.1" src="https://img.shields.io/badge/release-v1.0.1-blue" height="20" align="top"></a>
   <img alt="Switch 1 and Switch 2" src="https://img.shields.io/badge/Switch-1%20%26%202-337ab7" height="20" align="top">
   <img alt="C++17 reader" src="https://img.shields.io/badge/reader-C%2B%2B17-00599C" height="20" align="top">
 </p>
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.0"><strong>Download NXConvert 1.0.0</strong></a>
+  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.1"><strong>Download NXConvert 1.0.1</strong></a>
   &nbsp;·&nbsp;
   <a href="#performance-nx-vs-nup">NX vs NUP</a>
   &nbsp;·&nbsp;
@@ -40,8 +40,8 @@
 
 ## Quick start
 
-**NXConvert 1.0.0** creates NXFormat 1.0.0 archives with separate header pages.
-Download the [V1.0.0 release](https://github.com/fab918/nxformat/releases/tag/V1.0.0),
+**NXConvert 1.0.1** creates NXFormat 1.0.1 archives with separate header pages.
+Download the [V1.0.1 release](https://github.com/fab918/nxformat/releases/tag/V1.0.1),
 or build from source below. Desktop apps are available for Windows, Linux and
 macOS; Android packages provide libraries only.
 
@@ -92,10 +92,8 @@ For reads inside compressed files, the tested median was **1.7 ms with NUP** ver
 > **Benchmark details:** Donkey Kong Bananza, update 3.2.0 and DLC (Switch 2); Windows 11; 300 seeded random 4 KiB reads; warm operating-system cache. The comparison uses the NUP Python reference reader with libzstd and the NX C++17 reader. These are results for the tested implementations and workload, not a universal format speedup or an FPS benchmark. A native-to-native comparison and a larger sample are needed before making broader claims.
 
 The charts summarize an earlier local run whose individual read samples are not
-included. The repository now includes [NUP comparison tools](benchmarks/README.md#nup-and-native-package-comparisons),
-plus [a separate NUP settings run](benchmarks/results/NUP_VS_NX.md) and
-[a native-package comparison](benchmarks/results/NATIVE_VS_NX.md). Their settings
-and numbers differ from these charts; see each report for its scope and limits.
+included. The [NUP comparison tools](benchmarks/README.md#nup-and-native-package-comparisons)
+can repeat this kind of measurement on your own dumps.
 
 ### Faster packing
 
@@ -132,7 +130,7 @@ platform (Windows x64, Linux x64 and arm64, macOS universal, Android arm64):
 `bin/` (the Windows DLL and desktop NXConvert app). Android archives contain
 libraries and headers only. `SHA256SUMS` is a separate release attachment.
 
-For xmake, download `nxformat-xmake-1.0.0.zip` from the release and extract it.
+For xmake, download `nxformat-xmake-1.0.1.zip` from the release and extract it.
 It contains the package recipe with the published archive hashes. Point xmake
 at that extracted directory:
 
@@ -198,7 +196,7 @@ links the reader for play, and the nxformat library for every change.
 
 ## Documentation and development
 
-- [RELEASE.md](docs/RELEASE.md): V1.0.0 release notes and platform packages.
+- [RELEASE.md](docs/RELEASE.md): V1.0.1 release notes and platform packages.
 - [SPEC.md](docs/SPEC.md): wire format and versioning.
 - [CLI.md](docs/CLI.md): commands, native/NUP imports, extracted-tree declarations and resource limits.
 - [READER.md](docs/READER.md): C++ API, persistent sessions, emulator integration and access profiles.

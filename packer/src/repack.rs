@@ -39,11 +39,11 @@ pub const MAX_EMBEDDED_RECIPE_BYTES: u64 = 8 * 1024 * 1024;
 mod native_add;
 #[path = "reclaim.rs"]
 mod reclaim;
-pub(crate) use native_add::verify_extracted_source_files;
 pub use native_add::{
     add_native_content, add_native_contents, read_snapshot_file_range, NativeAddRequest,
     NativeAddStats,
 };
+pub(crate) use native_add::{add_native_contents_with_recipes, verify_extracted_source_files};
 
 type OptionalAppExtension = (u32, u32, u16, Vec<u8>);
 type OptionalCatalogExtension = (u32, u32, u16, u32, Vec<u8>);
@@ -162,6 +162,16 @@ pub struct ApplicationSummary {
     pub snapshots: Vec<SnapshotSummary>,
     /// Rebuild recipes kept inside the archive (see `recipe`).
     pub recipes: Vec<Vec<u8>>,
+    /// Manifest metadata for files outside the executable snapshots.
+    pub source_files: Vec<SourceFileSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFileSummary {
+    pub kind: u32,
+    pub path: String,
+    pub size: u64,
+    pub digest: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -232,12 +242,21 @@ pub fn inspect_snapshot_files(
         .iter()
         .find(|s| s.snapshot.identity == identity)
         .ok_or_else(|| invalid("snapshot identity not present"))?;
+    reference_files(&archive, snapshot.snapshot.root, options, &mut budget)
+}
+
+fn reference_files(
+    archive: &SourceArchive,
+    root: u32,
+    _options: &WriterOptions,
+    budget: &mut MemoryBudget,
+) -> Result<Vec<SnapshotFileReference>, WriterError> {
     let mut nodes = Vec::new();
     visit_identity_tree(
-        snapshot.snapshot.root,
+        root,
         &[],
         0,
-        &archive,
+        archive,
         &mut HashSet::new(),
         &mut nodes,
         &mut 0,
@@ -271,6 +290,34 @@ pub fn inspect_snapshot_files(
                 chunk_size_bytes: f.chunk_size_bytes,
                 blocks,
             });
+        }
+    }
+    Ok(result)
+}
+
+/// Independent source files, owned by an application rather than a game snapshot.
+pub fn inspect_source_resources(
+    path: impl AsRef<Path>,
+    platform: Platform,
+    application_id: u64,
+    options: &WriterOptions,
+) -> Result<Vec<(u32, Vec<SnapshotFileReference>)>, WriterError> {
+    validate_options(options)?;
+    let mut file = File::open(path)?;
+    let mut budget = MemoryBudget {
+        current: 0,
+        peak: 0,
+        limit: options.max_memory_bytes,
+    };
+    let archive = parse_archive(&mut file, 0, options, &mut budget)?;
+    let mut result = Vec::new();
+    for app in archive
+        .applications
+        .iter()
+        .filter(|a| a.key == (platform as u8, application_id))
+    {
+        for &(kind, root) in &app.source_resources {
+            result.push((kind, reference_files(&archive, root, options, &mut budget)?));
         }
     }
     Ok(result)
@@ -365,6 +412,7 @@ struct SourceApplication {
     key: (u8, u64),
     selected_identity: Option<[u8; 32]>,
     optional_extensions: Vec<OptionalAppExtension>,
+    source_resources: Vec<(u32, u32)>,
     recipes: Vec<Vec<u8>>,
 }
 
@@ -485,6 +533,7 @@ fn hash_range(
 
 #[derive(Clone, Copy)]
 struct SourceHeader {
+    minor: u16,
     archive_size: u64,
     catalog_offset: u64,
     catalog_size: u64,
@@ -522,7 +571,7 @@ fn zero_range(file: &mut File, offset: u64, size: u64) -> Result<(), WriterError
 fn decode_slot(bytes: &[u8]) -> Result<Option<SourceHeader>, WriterError> {
     if &bytes[..4] != b"NXAR"
         || read_u16(bytes, 4)? != 0
-        || read_u16(bytes, 6)? != 2
+        || !matches!(read_u16(bytes, 6)?, 2 | 3)
         || read_u32(bytes, 8)? != 256
         || read_u16(bytes, 12)? != PAGED_HEADERS
         || read_u16(bytes, 14)? != 0
@@ -533,6 +582,7 @@ fn decode_slot(bytes: &[u8]) -> Result<Option<SourceHeader>, WriterError> {
         return Ok(None);
     }
     Ok(Some(SourceHeader {
+        minor: read_u16(bytes, 6)?,
         archive_size: read_u64(bytes, 16)?,
         catalog_offset: read_u64(bytes, 24)?,
         catalog_size: read_u64(bytes, 32)?,
@@ -1562,6 +1612,7 @@ fn parse_catalog(
             key,
             selected_identity: None,
             optional_extensions: Vec::new(),
+            source_resources: Vec::new(),
             recipes: Vec::new(),
         });
         prior_app = Some(key);
@@ -1864,6 +1915,32 @@ fn parse_catalog(
                     owner_kind,
                     payload.to_vec(),
                 ));
+            }
+            SOURCE_RESOURCES => {
+                if flags != 1
+                    || owner_kind != 1
+                    || payload.len() < 16
+                    || &payload[..4] != b"NXSR"
+                    || read_u16(payload, 4)? != 1
+                    || read_u16(payload, 6)? != 16
+                    || read_u32(payload, 12)? != 0
+                {
+                    return Err(bad("invalid source resource descriptor"));
+                }
+                let count = read_u32(payload, 8)? as usize;
+                if count == 0 || count > 4096 || payload.len() != 16 + count * 8 {
+                    return Err(bad("invalid source resource count"));
+                }
+                budget.charge(count as u64 * 16, "source resource descriptors")?;
+                let mut prior = None;
+                for row in payload[16..].chunks_exact(8) {
+                    let item = (read_u32(row, 0)?, read_u32(row, 4)?);
+                    if item.0 > 1 || prior.is_some_and(|p| p >= item) {
+                        return Err(bad("invalid or unsorted source resource"));
+                    }
+                    prior = Some(item);
+                    apps[owner_index as usize].source_resources.push(item);
+                }
             }
             RECIPE_EXTENSION => {
                 if flags != 0 || owner_kind != 1 {
@@ -2513,6 +2590,55 @@ fn parse_archive(
         optional_global_extensions,
         inherited_files: HashMap::new(),
     };
+    let resource_count: usize = parsed
+        .applications
+        .iter()
+        .map(|a| a.source_resources.len())
+        .sum();
+    if resource_count > 4096 || (header.minor == 3) != (resource_count != 0) {
+        return Err(bad("format version disagrees with source resources"));
+    }
+    let mut roots = HashSet::new();
+    for app in &parsed.applications {
+        for &(kind, root) in &app.source_resources {
+            if !roots.insert(root) {
+                return Err(bad("shared source resource root"));
+            }
+            let entries = parsed
+                .directories
+                .get(root as usize)
+                .ok_or_else(|| bad("source resource root out of range"))?;
+            if entries.is_empty() || entries.iter().any(|e| e.kind != 2) {
+                return Err(bad("source resource must be a nonempty flat file set"));
+            }
+            if kind == 1 && (entries.len() != 1 || entries[0].name != "partition.hfs0") {
+                return Err(bad("system update resource must contain partition.hfs0"));
+            }
+            let mut seen = HashSet::new();
+            for e in entries {
+                if !seen.insert(e.target) {
+                    return Err(bad("repeated file in source resource"));
+                }
+            }
+        }
+    }
+    if !roots.is_empty() {
+        if parsed
+            .snapshots
+            .iter()
+            .any(|s| roots.contains(&s.snapshot.root))
+        {
+            return Err(bad("source resource root belongs to a snapshot"));
+        }
+        if parsed
+            .directories
+            .iter()
+            .flatten()
+            .any(|e| e.kind == 1 && roots.contains(&e.target))
+        {
+            return Err(bad("source resource root is a child directory"));
+        }
+    }
     validate_snapshot_identities(&parsed)?;
     Ok(parsed)
 }
@@ -4129,7 +4255,14 @@ fn write_repacked_archive(
     if archive_size > MAX_ARCHIVE_SIZE || archive_size > options.max_archive_size {
         return Err(limit_error("repacked archive exceeds supported size"));
     }
+    let extension_count = u32::from_le_bytes(catalog[40..44].try_into().unwrap());
+    let extension_offset = u64::from_le_bytes(catalog[88..96].try_into().unwrap());
+    let has_resources = (0..extension_count).any(|i| {
+        let at = extension_offset as usize + i as usize * 32;
+        u32::from_le_bytes(catalog[at..at + 4].try_into().unwrap()) == SOURCE_RESOURCES
+    });
     let header = encode_header(&HeaderFields {
+        source_resources: has_resources,
         archive_size,
         catalog_offset,
         catalog_size: catalog.len() as u64,
@@ -4182,6 +4315,35 @@ fn commit_generation(file: &mut File, header: &[u8; 256], slot: usize) -> std::i
     file.seek(SeekFrom::Start(HEADER_SLOTS[slot]))?;
     file.write_all(&page)?;
     file.sync_all()
+}
+
+/// Retire the older generations of a staged archive that no reader can have
+/// open yet: copy the selected header page into the other slot. Readers then
+/// see one generation and skip the older-generation checks at open. Bytes of
+/// retired tails stay as free space (SPEC §1, §8); nothing they hold is read.
+pub(crate) fn seal_staged_generations(
+    path: &Path,
+    options: &WriterOptions,
+) -> Result<(), WriterError> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let header = parse_header(&mut file, options)?;
+    let mut pages = [0u8; DATA_START as usize];
+    read_exact_at(&mut file, 0, &mut pages)?;
+    let (first, second) = pages.split_at(HEADER_PAGE_SIZE);
+    let (active, other) = if header.active_slot == 0 {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    if active == other {
+        return Ok(());
+    }
+    let selected: [u8; 256] = active[..256].try_into().unwrap();
+    commit_generation(&mut file, &selected, 1 - header.active_slot)?;
+    Ok(())
 }
 
 fn collect_tree_blocks(
@@ -4333,6 +4495,22 @@ fn inspect_archive_impl(
                     .and_then(|m| archive.media.get(m.nacp as usize).map(|media| media.digest)),
             })
             .collect();
+        let mut source_files = Vec::new();
+        for &(kind, root) in &app.source_resources {
+            for entry in &archive.directories[root as usize] {
+                let file = &archive.files[entry.target as usize];
+                budget.charge(
+                    entry.name.len() as u64 + std::mem::size_of::<SourceFileSummary>() as u64,
+                    "source file summary",
+                )?;
+                source_files.push(SourceFileSummary {
+                    kind,
+                    path: entry.name.clone(),
+                    size: file.size,
+                    digest: file.digest,
+                });
+            }
+        }
         applications.push(ApplicationSummary {
             platform,
             application_id: app.key.1,
@@ -4340,6 +4518,7 @@ fn inspect_archive_impl(
             programs,
             snapshots,
             recipes: app.recipes.clone(),
+            source_files,
         });
     }
     let mut reclaimable = 0;
@@ -4580,6 +4759,7 @@ pub fn compact_archive(
 /// Combine independently validated native selections before staging, while
 /// keeping one canonical Application/Program row per logical identity.
 fn merge_native_input(output: &mut ArchiveInput, input: ArchiveInput) -> Result<(), WriterError> {
+    output.source_resources.extend(input.source_resources);
     for mut addition in input.applications {
         if let Some(existing) = output.applications.iter_mut().find(|app| {
             app.platform == addition.platform && app.application_id == addition.application_id
@@ -4849,6 +5029,17 @@ fn repack_inner(
     for snapshot in combined.snapshots.iter().filter(|s| s.source_archive == 0) {
         collect_tree_blocks(&archives[0], snapshot.data.root, &mut retained_block_ids, 0)?;
     }
+    for app in &archives[0].applications {
+        if combined
+            .apps
+            .iter()
+            .any(|a| (a.platform, a.application_id) == app.key)
+        {
+            for &(_, root) in &app.source_resources {
+                collect_tree_blocks(&archives[0], root, &mut retained_block_ids, 0)?;
+            }
+        }
+    }
     let mut block_encoder = None;
     // HashSet iteration is randomized. Canonical block order is part of
     // deterministic output, so sort the live set before assigning new IDs.
@@ -4902,10 +5093,79 @@ fn repack_inner(
         )?;
         snapshot.data.root = root;
     }
-    // Blocks no snapshot uses are not merged.
+    for (owner, app) in combined.apps.iter().enumerate() {
+        let mut rows = Vec::new();
+        // An add of a cart already in the archive brings the same firmware
+        // again: keep one copy of an identical resource (kind and files).
+        let mut seen = HashSet::new();
+        for archive in &archives {
+            for source_app in archive
+                .applications
+                .iter()
+                .filter(|a| a.key == (app.platform, app.application_id))
+            {
+                for &(kind, root) in &source_app.source_resources {
+                    let content: Vec<(String, u64, [u8; 32])> = archive.directories[root as usize]
+                        .iter()
+                        .map(|e| {
+                            let file = &archive.files[e.target as usize];
+                            (e.name.clone(), file.size, file.digest)
+                        })
+                        .collect();
+                    if !seen.insert((kind, content)) {
+                        continue;
+                    }
+                    let root = append_snapshot_tree(
+                        archive.archive,
+                        root,
+                        archive,
+                        &mut files,
+                        &mut directories,
+                        &mut block_refs,
+                        &archives,
+                        &mut input_files,
+                        &mut block_maps,
+                        &mut output_blocks,
+                        &mut candidates,
+                        &mut stats,
+                        options,
+                        0,
+                        &mut block_encoder,
+                        &mut encoded_spool,
+                        scratch_bytes,
+                        &mut budget,
+                    )?;
+                    rows.push((kind, root));
+                }
+            }
+        }
+        if !rows.is_empty() {
+            rows.sort_unstable();
+            combined
+                .extensions
+                .push(source_resource_extension(owner as u32, &rows));
+        }
+    }
+    // Blocks no snapshot or resource uses are not merged.
     options
         .progress
         .add_done(scratch_units.saturating_sub(options.progress.done() - merged_from));
+    let with_deferred;
+    let recipes = match recipes.deferred {
+        Some(make) => {
+            let present: HashSet<(u64, [u8; 32])> =
+                files.iter().map(|f| (f.size, f.digest)).collect();
+            let mut add = recipes.add.clone();
+            add.extend(make(&present)?);
+            with_deferred = CatalogEdit {
+                add,
+                remove: recipes.remove.clone(),
+                ..CatalogEdit::default()
+            };
+            &with_deferred
+        }
+        None => recipes,
+    };
     let recipe_extensions = recipe_extensions(&combined.apps, &files, &archives[0], recipes)?;
     combined.extensions.extend(recipe_extensions);
     let final_snapshots: Vec<FinalSnapshot> =
@@ -5107,11 +5367,18 @@ fn repack_inner(
     Ok(native_stats)
 }
 
+/// Recipes made from the edited archive's `(size, SHA-256)` file set, once it
+/// is staged and before it is published: a failure publishes nothing.
+pub(crate) type DeferredRecipes<'a> =
+    &'a dyn Fn(&HashSet<(u64, [u8; 32])>) -> Result<Vec<(Platform, u64, Vec<u8>)>, WriterError>;
+
 /// Catalog-only changes made during a repack: rebuild recipes and metadata.
 #[derive(Default)]
-pub(crate) struct CatalogEdit {
+pub(crate) struct CatalogEdit<'a> {
     /// (platform, application ID, recipe bytes).
     pub add: Vec<(Platform, u64, Vec<u8>)>,
+    /// More recipes to add, made from the staged archive (see `DeferredRecipes`).
+    pub deferred: Option<DeferredRecipes<'a>>,
     /// Recipe checksums (`RecipeInfo::recipe_sha256`) to drop.
     pub remove: Vec<[u8; 32]>,
     /// Display metadata to set.
@@ -5432,8 +5699,159 @@ pub fn edit_archive_recipes(
         &CatalogEdit {
             add,
             remove,
-            metadata: Vec::new(),
+            ..CatalogEdit::default()
         },
     )
     .map(|s| s.repack)
+}
+
+#[cfg(test)]
+mod source_resource_validation_tests {
+    use super::*;
+
+    fn image() -> Vec<u8> {
+        let app = 0x0100_0000_0001_0000;
+        let bytes = crate::native::synthetic::dxci(&[
+            ("update", vec![("unknown.bin".into(), vec![7; 5000])]),
+            (
+                "secure",
+                crate::native::synthetic::title_entries(
+                    &crate::native::synthetic::TitleSpec::application(app, 0, 4),
+                ),
+            ),
+        ]);
+        let (mut source, source_guard) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-resource-source")).unwrap();
+        source.write_all(&bytes).unwrap();
+        drop(source);
+        let (output, output_guard) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-resource-output")).unwrap();
+        drop(output);
+        let native = crate::native::InventoryOptions::default();
+        let inventory =
+            crate::native::inventory(std::slice::from_ref(&source_guard.path), &native).unwrap();
+        crate::conversion::convert_inventory(
+            &inventory,
+            &output_guard.path,
+            &native,
+            IntegrityPolicy::Strict,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        std::fs::read(output_guard.path.clone()).unwrap()
+    }
+
+    // Re-sign metadata so rejection tests structure/ownership, not just hashes.
+    fn resign(bytes: &mut [u8]) {
+        let cat = read_u64(bytes, 24).unwrap() as usize;
+        let len = read_u64(bytes, 32).unwrap() as usize;
+        let digest = sha256(&bytes[cat..cat + len]);
+        for slot in [0, 4096] {
+            bytes[slot + 120..slot + 152].copy_from_slice(&digest);
+            let crc = crc32c(&bytes[slot..slot + 252]);
+            write_u32_at(bytes, slot + 252, crc);
+        }
+    }
+
+    #[test]
+    fn failed_deferred_recipes_publish_nothing() {
+        let app = 0x0100_0000_0001_0000;
+        let base = image();
+        let patch = crate::native::synthetic::dxci(&[
+            ("update", vec![("other.bin".into(), vec![9; 3000])]),
+            (
+                "secure",
+                crate::native::synthetic::title_entries(
+                    &crate::native::synthetic::TitleSpec::patch(app, 1, 9),
+                ),
+            ),
+        ]);
+        let (mut file, archive) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-deferred-archive")).unwrap();
+        file.write_all(&base).unwrap();
+        drop(file);
+        let (mut file, source) =
+            unique_temp(&std::env::temp_dir(), OsStr::new("nx-deferred-patch")).unwrap();
+        file.write_all(&patch).unwrap();
+        drop(file);
+        let request = NativeAddRequest::new(&source.path, app | 0x800, 1);
+        let native = crate::native::InventoryOptions::default();
+        let options = WriterOptions::default();
+        let seen = std::cell::Cell::new(false);
+        let fail = |known: &HashSet<(u64, [u8; 32])>| {
+            // Called with the staged archive's files, before publication.
+            seen.set(!known.is_empty());
+            Err(invalid("recipe refused"))
+        };
+        let error = add_native_contents_with_recipes(
+            &archive.path,
+            &archive.path,
+            std::slice::from_ref(&request),
+            &native,
+            &options,
+            IntegrityPolicy::Fast,
+            Some(&fail),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("recipe refused"), "{error}");
+        assert!(seen.get());
+        assert_eq!(std::fs::read(&archive.path).unwrap(), base);
+        // Without the failing hook the same add succeeds.
+        add_native_contents_with_recipes(
+            &archive.path,
+            &archive.path,
+            std::slice::from_ref(&request),
+            &native,
+            &options,
+            IntegrityPolicy::Fast,
+            None,
+        )
+        .unwrap();
+        assert_ne!(std::fs::read(&archive.path).unwrap(), base);
+    }
+
+    #[test]
+    fn authenticated_invalid_resource_descriptors_reject() {
+        let valid = image();
+        let cat = read_u64(&valid, 24).unwrap() as usize;
+        let table = cat + read_u64(&valid, cat + 88).unwrap() as usize;
+        let count = read_u32(&valid, cat + 40).unwrap() as usize;
+        let descriptor = (0..count)
+            .map(|i| table + i * 32)
+            .find(|&at| read_u32(&valid, at).unwrap() == SOURCE_RESOURCES)
+            .unwrap();
+        let payload = cat + read_u64(&valid, descriptor + 16).unwrap() as usize;
+        let snapshot_table = cat + read_u64(&valid, cat + 64).unwrap() as usize;
+        let snapshot_root = read_u32(&valid, snapshot_table + 12).unwrap();
+        for case in 0..7 {
+            let mut bytes = valid.clone();
+            match case {
+                0 => write_u32_at(&mut bytes, payload + 20, u32::MAX),
+                1 => write_u32_at(&mut bytes, payload + 16, 2),
+                2 => write_u32_at(&mut bytes, descriptor + 4, 0),
+                3 => write_u32_at(&mut bytes, descriptor + 12, u32::MAX),
+                4 => write_u32_at(&mut bytes, payload + 8, 4097),
+                5 => write_u32_at(&mut bytes, payload + 20, snapshot_root),
+                _ => {
+                    for slot in [0, 4096] {
+                        write_u16_at(&mut bytes, slot + 6, 2);
+                    }
+                }
+            }
+            resign(&mut bytes);
+            let (mut file, guard) =
+                unique_temp(&std::env::temp_dir(), OsStr::new("nx-resource-invalid")).unwrap();
+            file.write_all(&bytes).unwrap();
+            drop(file);
+            assert!(
+                inspect_archive(
+                    &guard.path,
+                    &WriterOptions::default(),
+                    IntegrityPolicy::Fast
+                )
+                .is_err(),
+                "case {case}"
+            );
+        }
+    }
 }
