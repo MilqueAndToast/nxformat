@@ -265,12 +265,15 @@ pub struct SnapshotMetadata {
     pub opaque: Vec<MediaInput>,
 }
 
-/// Optional user-supplied display information. Native titles, icons and NACP
-/// bytes take precedence. This never supplies execution identifiers or metadata.
+/// Optional user-supplied display information. Native NACP and execution
+/// metadata are never changed.
 #[derive(Clone, Default)]
 pub struct DisplayFallback {
     pub title: Option<String>,
+    pub publisher: Option<String>,
     pub icon: Option<(MediaType, std::sync::Arc<[u8]>)>,
+    pub replace_existing: bool,
+    pub application_id: Option<u64>,
 }
 
 impl SnapshotMetadata {

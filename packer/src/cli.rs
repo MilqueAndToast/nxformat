@@ -102,8 +102,8 @@ pub fn run_with_display(
 }
 const MIB: u64 = 1024 * 1024;
 /// Hard ceilings accepted by `ImportLimits::validate`.
-const NODE_CEILING: usize = 1_000_000;
-const INVENTORY_CEILING: u64 = 1024 * MIB;
+const NODE_CEILING: usize = import::ImportLimits::MAX_NODES;
+const INVENTORY_CEILING: u64 = import::ImportLimits::MAX_INVENTORY_BYTES;
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -120,6 +120,7 @@ nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...] (rebuild the original files i
 nxconvert check-recipe ARCHIVE.nx (replay every recipe kept in the NX)\n\
 nxconvert scan SOURCE|FOLDER... (decrypted packages; @SOURCE, @CONTENT and @ISSUE lines)\n\
 nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @RESOURCE, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
+nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
@@ -315,6 +316,7 @@ fn size_budgets(
         writer.display_fallback = Some(DisplayFallback {
             title: o.fallback_title.clone(),
             icon,
+            ..Default::default()
         });
     }
     if let Some(w) = measured {
@@ -707,7 +709,7 @@ fn check_nup(args: &[String], o: &Options) -> Result<(), Box<dyn std::error::Err
     let limits = import::ImportLimits {
         max_nodes: o.max_nodes.unwrap_or(NODE_CEILING),
         max_inventory_bytes: o.inventory.unwrap_or(INVENTORY_CEILING),
-        ..Default::default()
+        ..import::ImportLimits::for_nup()
     };
     let check = import::check_nup(
         Path::new(&args[1]),
@@ -743,11 +745,7 @@ fn pack_nup(args: &[String], o: &Options) -> Result<(), Box<dyn std::error::Erro
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let mut limits = import::ImportLimits {
-        max_nodes: o.max_nodes.unwrap_or(NODE_CEILING),
-        max_inventory_bytes: o.inventory.unwrap_or(INVENTORY_CEILING),
-        ..Default::default()
-    };
+    let mut limits = import::ImportLimits::for_nup();
     let platform = match o.platform.as_deref() {
         Some("switch1") => Platform::Switch1,
         Some("switch2") => Platform::Switch2,
@@ -1501,6 +1499,12 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
             print_scan(&inventory(&sources, &native)?);
         }
         ("contents", 2) => print_contents(Path::new(&args[1]), &options)?,
+        ("extract-exefs", 4) => {
+            let watch = ProgressWatch::counter(o.frontend, &options.progress);
+            extract_exefs(&args[1], parse_identity(&args[2])?, &args[3], &options)?;
+            drop(watch);
+            println!("Extracted ExeFS to {}", args[3]);
+        }
         ("add", n) if n >= 3 => {
             let archive = Path::new(&args[1]);
             let sources: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
@@ -1800,6 +1804,7 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 | "check-recipe"
                 | "scan"
                 | "contents"
+                | "extract-exefs"
                 | "add"
                 | "remove"
                 | "compact"

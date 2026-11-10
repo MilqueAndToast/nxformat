@@ -1037,7 +1037,9 @@ fn preflight(
         for s in &mut app.snapshots {
             cancelled(options)?;
             if s.snapshot_type != SnapshotType::Dlc {
-                if let Some(fallback) = &options.display_fallback {
+                if let Some(fallback) = options.display_fallback.as_ref().filter(|display| {
+                    display.application_id.is_none_or(|id| id == app.application_id)
+                }) {
                     let metadata = s.metadata.get_or_insert_with(|| SnapshotMetadata {
                         title: None,
                         publisher: None,
@@ -1047,20 +1049,33 @@ fn preflight(
                         opaque: Vec::new(),
                     });
                     let mut supplied = Vec::new();
-                    if metadata
-                        .title
-                        .as_ref()
-                        .map_or(true, |t| t.trim().is_empty())
+                    if fallback.replace_existing
+                        || metadata
+                            .title
+                            .as_ref()
+                            .map_or(true, |t| t.trim().is_empty())
                     {
                         if let Some(title) = &fallback.title {
                             check_optional_text(&Some(title.clone()), 4096, "fallback title")?;
                             if !title.trim().is_empty() {
                                 metadata.title = Some(title.trim().to_owned());
+                                if fallback.replace_existing {
+                                    for local in &mut metadata.localized {
+                                        local.title = None;
+                                    }
+                                }
                                 supplied.push("title");
                             }
                         }
                     }
-                    if metadata.icon.is_none() {
+                    if let Some(publisher) = &fallback.publisher {
+                        if fallback.replace_existing || metadata.publisher.is_none() {
+                            check_optional_text(&Some(publisher.clone()), 4096, "publisher")?;
+                            metadata.publisher = Some(publisher.clone());
+                            supplied.push("publisher");
+                        }
+                    }
+                    if fallback.replace_existing || metadata.icon.is_none() {
                         if let Some((kind, bytes)) = &fallback.icon {
                             if !matches!(kind, MediaType::PngIcon | MediaType::JpegIcon)
                                 || bytes.len() > 16 * 1024 * 1024
@@ -1074,10 +1089,18 @@ fn preflight(
                                 bytes.len() as u64,
                                 io::Cursor::new(bytes.clone()),
                             ));
+                            if fallback.replace_existing {
+                                for local in &mut metadata.localized {
+                                    local.icon = None;
+                                }
+                            }
                             supplied.push("icon");
                         }
                     }
                     if !supplied.is_empty() {
+                        metadata
+                            .localized
+                            .retain(|local| local.title.is_some() || local.icon.is_some());
                         metadata.opaque.push(MediaInput::from_bytes(
                             MediaType::Opaque,
                             format!("nxformat:user-display:v1\n{}\n", supplied.join(","))
@@ -4296,6 +4319,9 @@ fn process_file(
     deduplicated_blocks: &mut u64,
     timings: &mut WriterTimings,
 ) -> Result<u32, WriterError> {
+    // Keep the file metadata for the tree, but release its reader as soon as
+    // this file is consumed, including on cancellation.
+    let mut reader = std::mem::replace(&mut source.reader, Box::new(io::empty()));
     let block_count = if source.size == 0 {
         0
     } else {
@@ -4335,7 +4361,7 @@ fn process_file(
         cancelled(options)?;
         let n = remaining.min(source.chunk_size_bytes as u64) as usize;
         let input_started = Instant::now();
-        read_exact_cancelled(&mut *source.reader, &mut block_buffer[..n], options)?;
+        read_exact_cancelled(&mut *reader, &mut block_buffer[..n], options)?;
         timings.input_read += input_started.elapsed();
         let hash_started = Instant::now();
         file_hash.update(&block_buffer[..n]);
@@ -4383,7 +4409,7 @@ fn process_file(
         cancelled(options)?;
         let n = remaining.min(source.chunk_size_bytes as u64) as usize;
         let input_started = Instant::now();
-        read_exact_cancelled(&mut *source.reader, &mut block_buffer[..n], options)?;
+        read_exact_cancelled(&mut *reader, &mut block_buffer[..n], options)?;
         timings.input_read += input_started.elapsed();
         let bytes = &block_buffer[..n];
         let hash_started = Instant::now();
@@ -4410,11 +4436,12 @@ fn process_file(
         remaining -= n as u64;
     }
     let mut extra = [0u8; 1];
-    if source.reader.read(&mut extra)? != 0 {
+    if reader.read(&mut extra)? != 0 {
         return Err(invalid(
             "file stream contains bytes beyond its declared logical size",
         ));
     }
+    drop(reader);
     cancelled(options)?;
     let hash_started = Instant::now();
     let digest = file_hash.finish();
@@ -4919,8 +4946,8 @@ fn plan_inputs(
 mod repack;
 pub use repack::{
     add_native_content, add_native_contents, compact_archive, edit_archive_metadata,
-    edit_archive_recipes, inspect_archive, inspect_snapshot_files, inspect_source_resources,
-    read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp, repack_archive,
+    edit_archive_recipes, extract_exefs, inspect_archive, inspect_snapshot_files, inspect_source_resources,
+    read_original_icon, read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp, repack_archive,
     ApplicationSummary, ArchiveSummary, IntegrityPolicy, MetadataEdit, MetadataSourceSelection,
     NativeAddRequest, NativeAddStats, ProgramSummary, RepackPlan, RepackStats,
     SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
@@ -4945,6 +4972,7 @@ mod regression_tests {
             display_fallback: Some(DisplayFallback {
                 title: Some("User title".into()),
                 icon: Some((MediaType::JpegIcon, Arc::from(&b"artwork"[..]))),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -5446,6 +5474,56 @@ mod regression_tests {
                 )]),
             }],
         }])
+    }
+
+    #[test]
+    fn closes_each_reader_before_opening_the_next_file() {
+        struct TrackedReader {
+            first: bool,
+            closed: Arc<AtomicBool>,
+            data: io::Cursor<[u8; 1]>,
+        }
+        impl Read for TrackedReader {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                if !self.first {
+                    assert!(self.closed.load(Ordering::Relaxed));
+                }
+                self.data.read(bytes)
+            }
+        }
+        impl Drop for TrackedReader {
+            fn drop(&mut self) {
+                if self.first {
+                    self.closed.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut archive = test_archive(Vec::new());
+        archive.applications[0].snapshots[0].root = DirectoryInput::new(
+            ["a", "b"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    EntryInput::file(
+                        name,
+                        FileInput::new(
+                            1,
+                            TrackedReader {
+                                first: index == 0,
+                                closed: closed.clone(),
+                                data: io::Cursor::new([index as u8]),
+                            },
+                        ),
+                    )
+                })
+                .collect(),
+        );
+        let id = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("nx-close-reader-{}-{id}.nx", std::process::id()));
+        write_archive(archive, &path, &WriterOptions::default()).unwrap();
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

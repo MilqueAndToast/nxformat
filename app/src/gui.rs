@@ -1,7 +1,7 @@
 //! Native NXConvert window. Discovery and archive commands use the shared
 //! packer APIs on workers; the UI owns presentation and artwork cropping.
 use eframe::egui;
-use nxformat_packer::{cli, CancellationToken};
+use nxformat_packer::{cli, CancellationToken, IntegrityPolicy, MetadataEdit, Platform, WriterOptions};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod artwork;
@@ -51,11 +51,13 @@ struct Content {
     version: u32,
     display: String,
     name: String,
+    publisher: String,
 }
 
 #[derive(Clone, Default)]
 struct Source {
-    tree: bool,
+    kind: SourceKind,
+    nup_platform: Option<Platform>,
     icon: Option<Vec<u8>>,
     path: PathBuf,
     size: u64,
@@ -64,6 +66,14 @@ struct Source {
     issue: String,
     contents: Vec<Content>,
     selected: bool,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum SourceKind {
+    #[default]
+    Native,
+    Extracted,
+    Nup,
 }
 
 #[derive(Clone, Default)]
@@ -92,7 +102,21 @@ struct Archive {
     allocated: Option<u64>,
     snapshots: Vec<Snapshot>,
     originals: Vec<Original>,
+    metadata: Option<ArchiveMetadata>,
 }
+
+#[derive(Default)]
+struct ArchiveMetadata {
+    id: u64,
+    editable: bool,
+    title: String,
+    publisher: String,
+    icon: Option<Vec<u8>>,
+    original: Option<Vec<u8>>,
+    original_texture: Option<egui::TextureHandle>,
+}
+
+const ARCHIVE_ARTWORK: &str = "\0archive-artwork";
 
 // ---- running commands ----
 
@@ -102,6 +126,7 @@ enum Purpose {
     Pack,
     Contents,
     Edit,
+    Export,
 }
 
 struct Job {
@@ -109,11 +134,13 @@ struct Job {
     args: Vec<String>,
     purpose: Purpose,
     display: Option<nxformat_packer::DisplayFallback>,
+    metadata: Option<MetadataEdit>,
+    source_bytes: Option<u64>,
 }
 
 enum Message {
     Sources(Vec<Source>),
-    Cover(Vec<u8>),
+    Metadata(Option<ArchiveMetadata>),
     Line(bool, String),
     Done(Result<(), String>),
 }
@@ -128,13 +155,14 @@ struct Running {
     started: Instant,
 }
 
-fn start(job: Job, ctx: &egui::Context) -> Running {
+fn start(mut job: Job, ctx: &egui::Context) -> Running {
     let (tx, rx) = mpsc::channel();
     let cancel = CancellationToken::default();
     let token = cancel.clone();
     let args = job.args.clone();
     let purpose = job.purpose;
     let display = job.display.clone();
+    let metadata = job.metadata.take();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         let lines = tx.clone();
@@ -147,30 +175,29 @@ fn start(job: Job, ctx: &egui::Context) -> Running {
             discovery::scan(args[1..].iter().map(PathBuf::from).collect(), &token).map(|sources| {
                 let _ = tx.send(Message::Sources(sources));
             })
+        } else if let Some(edit) = metadata {
+            nxformat_packer::edit_archive_metadata(
+                &args[1],
+                vec![edit],
+                &WriterOptions {
+                    cancellation: token,
+                    ..Default::default()
+                },
+                IntegrityPolicy::Fast,
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         } else {
-            let result = cli::run_with_display(args.clone(), Some(sink), Some(token), display)
-                .map_err(|e| e.to_string());
+            let result =
+                cli::run_with_display(args.clone(), Some(sink), Some(token.clone()), display)
+                    .map_err(|e| e.to_string());
             if purpose == Purpose::Contents && result.is_ok() {
-                let options = nxformat_packer::WriterOptions::default();
-                if let Ok(summary) = nxformat_packer::inspect_archive(
-                    &args[1],
-                    &options,
-                    nxformat_packer::IntegrityPolicy::Fast,
-                ) {
-                    if let Some(identity) = summary
-                        .applications
-                        .first()
-                        .and_then(|a| a.metadata_snapshot_identity)
-                    {
-                        if let Ok(data) = nxformat_packer::read_snapshot_display(
-                            &args[1], identity, &options, true,
-                        ) {
-                            if let Some(icon) = data.icon {
-                                let _ = tx.send(Message::Cover(icon));
-                            }
-                        }
-                    }
-                }
+                let options = WriterOptions {
+                    cancellation: token,
+                    ..Default::default()
+                };
+                let metadata = read_archive_metadata(Path::new(&args[1]), &options);
+                let _ = tx.send(Message::Metadata(metadata));
             }
             result
         };
@@ -186,6 +213,34 @@ fn start(job: Job, ctx: &egui::Context) -> Running {
         lines: Vec::new(),
         started: Instant::now(),
     }
+}
+
+fn read_archive_metadata(path: &Path, options: &WriterOptions) -> Option<ArchiveMetadata> {
+    let summary = nxformat_packer::inspect_archive(path, options, IntegrityPolicy::Fast).ok()?;
+    let app = summary.applications.first()?;
+    let editable = summary.applications.len() == 1;
+    let display = match app.metadata_snapshot_identity {
+        Some(identity) => {
+            nxformat_packer::read_snapshot_display(path, identity, options, true).ok()?
+        }
+        None => Default::default(),
+    };
+    let original = if editable {
+        nxformat_packer::read_original_icon(path, app.platform, app.application_id, options)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    Some(ArchiveMetadata {
+        id: app.application_id,
+        editable,
+        title: display.title.unwrap_or_default(),
+        publisher: display.publisher.unwrap_or_default(),
+        icon: display.icon,
+        original,
+        ..Default::default()
+    })
 }
 
 fn text(path: &Path) -> String {
@@ -301,10 +356,158 @@ mod tests {
         let games = app.games();
         assert!(!app.native_package(&games[0]) && app.firmware_bytes(&games[0]) == 0);
     }
+
+    #[test]
+    fn nup_sources_convert_with_updates_dlc_and_metadata() {
+        use super::{
+            cli, discovery, Appearance, CancellationToken, IntegrityPolicy, Platform, WriterOptions,
+        };
+        use nxformat_packer::import::{
+            structures::NpdmProfile,
+            synthetic::npdm,
+            synthetic_nup::{addon, base, build, update, Node},
+        };
+        use nxformat_packer::{inspect_archive, read_snapshot_display, SnapshotType};
+
+        let dir = std::env::temp_dir().join(format!("nxconvert-nup-test-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        for (app_id, platform, standalone) in [
+            (0x0100_0000_0001_0000, Platform::Switch1, false),
+            (0x0400_0000_0001_0000, Platform::Switch2, false),
+            (0x0400_0000_0002_0000, Platform::Switch2, true),
+        ] {
+            let source = dir.join(format!("{app_id:016x}.NUP"));
+            let mut packages = vec![update(app_id, 65536, u8::from(standalone)), addon(app_id)];
+            if !standalone {
+                packages.insert(0, base(app_id));
+            }
+            if platform == Platform::Switch1 {
+                for node in packages
+                    .iter_mut()
+                    .filter_map(|p| p.exefs.as_mut())
+                    .flatten()
+                {
+                    if let Node::File("main.npdm", bytes) = node {
+                        *bytes = npdm(app_id, NpdmProfile::MetaAcid2048V1);
+                    }
+                }
+            }
+            std::fs::write(&source, build(&packages, true)).unwrap();
+            let token = CancellationToken::default();
+            let selected_path = if platform == Platform::Switch1 {
+                dir.clone()
+            } else {
+                source.clone()
+            };
+            let mut app = App {
+                sources: discovery::scan(vec![selected_path], &token).unwrap(),
+                ..Default::default()
+            };
+            assert_eq!(app.sources[0].nup_platform, Some(platform));
+            assert_eq!(app.sources[0].contents.len(), packages.len());
+            let game = app.games().remove(0);
+            assert_eq!(game.default_title, "Synthetic Game");
+            app.appearances.insert(
+                game.key,
+                Appearance {
+                    title: "Custom NUP title".into(),
+                    publisher: "Custom NUP publisher".into(),
+                    ..Default::default()
+                },
+            );
+            let output = app.games().remove(0).output.unwrap();
+            app.convert();
+            let job = app.queue.pop_front().unwrap();
+            assert_eq!(job.args[0], "pack-nup");
+            assert!(job.args.windows(2).any(|args| args == ["--level", "1"]));
+            assert_eq!(
+                job.source_bytes,
+                Some(std::fs::metadata(&source).unwrap().len())
+            );
+            assert!(!job.args.iter().any(|arg| arg == "--skip-dlc"));
+            cli::run_with_display(job.args, None, Some(token), job.display).unwrap();
+            let options = WriterOptions::default();
+            let summary = inspect_archive(&output, &options, IntegrityPolicy::Strict).unwrap();
+            let application = &summary.applications[0];
+            assert_eq!(
+                (application.application_id, application.platform),
+                (app_id, platform)
+            );
+            assert_eq!(application.snapshots.len(), packages.len());
+            assert!(application
+                .snapshots
+                .iter()
+                .any(|s| s.snapshot_type == SnapshotType::Dlc));
+            let metadata = read_snapshot_display(
+                &output,
+                application.metadata_snapshot_identity.unwrap(),
+                &options,
+                false,
+            )
+            .unwrap();
+            assert_eq!(metadata.title.as_deref(), Some("Custom NUP title"));
+            assert_eq!(metadata.publisher.as_deref(), Some("Custom NUP publisher"));
+            let snapshot = application
+                .snapshots
+                .iter()
+                .find(|snapshot| snapshot.numeric_version == 65536)
+                .unwrap();
+            let extracted = dir.join(format!("{app_id:016x}-exefs"));
+            let before = std::fs::read(&output).unwrap();
+            nxformat_packer::extract_exefs(&output, snapshot.identity, &extracted, &options)
+                .unwrap();
+            assert!(std::fs::read(extracted.join("main"))
+                .unwrap()
+                .starts_with(b"NSO0"));
+            assert_eq!(std::fs::read(&output).unwrap(), before);
+            assert!(nxformat_packer::extract_exefs(
+                &output,
+                snapshot.identity,
+                &extracted,
+                &options
+            )
+            .is_err());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nup_discovery_uses_the_conversion_inventory_limits() {
+        use super::{discovery, CancellationToken};
+        use nxformat_packer::import::synthetic_nup::{base, build, Node};
+
+        let names: Vec<&str> = (0..1000)
+            .map(|i| -> &'static str {
+                Box::leak(format!("{i:04}-{}", "x".repeat(240)).into_boxed_str())
+            })
+            .collect();
+        let mut package = base(0x0400_0000_0001_0000);
+        let romfs = package.romfs.as_mut().unwrap();
+        for i in 0..105 {
+            let dir = Box::leak(format!("dir-{i:03}").into_boxed_str());
+            romfs.push(Node::Dir(
+                dir,
+                names
+                    .iter()
+                    .map(|name| Node::File(name, Vec::new()))
+                    .collect(),
+            ));
+        }
+        let fixture = build(&[package], false);
+        let toc_bytes = u64::from_le_bytes(fixture[16..24].try_into().unwrap());
+        assert!(toc_bytes > 32 * 1024 * 1024);
+        let path =
+            std::env::temp_dir().join(format!("nxconvert-large-toc-{}.nup", std::process::id()));
+        std::fs::write(&path, fixture).unwrap();
+        let sources = discovery::scan(vec![path.clone()], &CancellationToken::default());
+        std::fs::remove_file(path).unwrap();
+        let sources = sources.unwrap();
+        assert!(sources[0].supported, "{}", sources[0].issue);
+    }
 }
 
 fn bytes(size: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = size as f64;
     let mut unit = 0;
     while value >= 1024.0 && unit + 1 < UNITS.len() {
@@ -357,10 +560,12 @@ fn is_nx(path: &Path) -> bool {
 
 struct Game {
     key: String,
-    tree: bool,
+    kind: SourceKind,
     missing_title: bool,
     application: u64,
     name: String,
+    default_title: String,
+    publisher: String,
     sources: Vec<usize>,
     output: Option<PathBuf>,
     problem: String,
@@ -369,9 +574,12 @@ struct Game {
 #[derive(Default)]
 struct Appearance {
     title: String,
+    publisher: String,
     icon: Option<Arc<[u8]>>,
     texture: Option<egui::TextureHandle>,
 }
+
+type EncodedArtwork = Result<(Vec<u8>, egui::ColorImage), String>;
 
 struct App {
     appearances: HashMap<String, Appearance>,
@@ -380,7 +588,7 @@ struct App {
     focused: String,
     crop: Option<artwork::Crop>,
     art_rx: Option<mpsc::Receiver<(String, Result<artwork::Artwork, String>)>>,
-    platform: usize,
+    crop_rx: Option<mpsc::Receiver<(String, EncodedArtwork)>>,
     last_output: Option<PathBuf>,
     remove_confirmation: Option<(String, Vec<String>)>,
     sources: Vec<Source>,
@@ -390,6 +598,7 @@ struct App {
     recipe: bool,
     include_firmware: bool,
     omitted_firmware: HashSet<String>,
+    nup_platforms: HashMap<PathBuf, Platform>,
     archive: Option<Archive>,
     queue: VecDeque<Job>,
     running: Option<Running>,
@@ -406,16 +615,17 @@ impl Default for App {
             focused: String::new(),
             crop: None,
             art_rx: None,
-            platform: 0,
+            crop_rx: None,
             last_output: None,
             remove_confirmation: None,
             sources: Vec::new(),
             output_dir: None,
-            level: 3,
+            level: 1,
             no_compress: false,
             recipe: true,
             include_firmware: true,
             omitted_firmware: HashSet::new(),
+            nup_platforms: HashMap::new(),
             archive: None,
             queue: VecDeque::new(),
             running: None,
@@ -436,6 +646,8 @@ impl App {
             args,
             purpose,
             display: None,
+            metadata: None,
+            source_bytes: None,
         });
     }
 
@@ -456,6 +668,7 @@ impl App {
 
     fn open_archive(&mut self, path: PathBuf) {
         self.archive_cover = None;
+        self.appearances.remove(ARCHIVE_ARTWORK);
         self.archive = Some(Archive {
             path: path.clone(),
             ..Default::default()
@@ -478,7 +691,7 @@ impl App {
     }
 
     fn drop_files(&mut self, files: Vec<PathBuf>) {
-        if self.busy() {
+        if self.busy() || self.art_rx.is_some() || self.crop.is_some() || self.crop_rx.is_some() {
             self.status = "Wait for the current operation before adding more files.".into();
             return;
         }
@@ -490,11 +703,23 @@ impl App {
             })
         });
         if let Some(path) = images.first() {
-            let key = self.focused.clone();
+            let key = if self
+                .archive
+                .as_ref()
+                .and_then(|archive| archive.metadata.as_ref())
+                .is_some_and(|metadata| metadata.editable)
+            {
+                ARCHIVE_ARTWORK.into()
+            } else if self.archive.is_none() {
+                self.focused.clone()
+            } else {
+                String::new()
+            };
             if !key.is_empty() {
                 self.load_artwork(key, path.clone());
             } else {
-                self.status = "Add a game before choosing its artwork.".into();
+                self.status =
+                    "Select a source or open the metadata editor before choosing artwork.".into();
             }
         }
         let (nx, others): (Vec<PathBuf>, Vec<PathBuf>) = files.into_iter().partition(|p| is_nx(p));
@@ -510,29 +735,27 @@ impl App {
     fn games(&self) -> Vec<Game> {
         let mut games: Vec<Game> = Vec::new();
         for (index, source) in self.sources.iter().enumerate() {
-            let Some(first) = source.contents.first() else {
+            let Some(first) = source.contents.iter()
+                .find(|c| c.kind == "base" || c.kind == "standalone")
+                .or_else(|| source.contents.first()) else {
                 continue;
             };
-            let at = match games.iter().position(|g| {
-                g.key
-                    == if source.tree {
-                        text(&source.path)
-                    } else {
-                        format!("{}:{:016X}", first.platform, first.application)
-                    }
-            }) {
+            let key = if source.kind == SourceKind::Native {
+                format!("{}:{:016X}", first.platform, first.application)
+            } else {
+                text(&source.path)
+            };
+            let at = match games.iter().position(|g| g.key == key) {
                 Some(at) => at,
                 None => {
                     games.push(Game {
-                        key: if source.tree {
-                            text(&source.path)
-                        } else {
-                            format!("{}:{:016X}", first.platform, first.application)
-                        },
-                        tree: source.tree,
+                        key,
+                        kind: source.kind,
                         missing_title: true,
                         application: first.application,
                         name: String::new(),
+                        default_title: String::new(),
+                        publisher: String::new(),
                         sources: Vec::new(),
                         output: None,
                         problem: String::new(),
@@ -547,16 +770,12 @@ impl App {
                     && (game.name.is_empty() || c.kind == "base" || c.kind == "standalone")
                 {
                     game.name = c.name.clone();
+                    game.publisher = c.publisher.clone();
                 }
             }
         }
         for game in &mut games {
             game.missing_title = game.name.is_empty();
-            if let Some(appearance) = self.appearances.get(&game.key) {
-                if game.missing_title && !appearance.title.trim().is_empty() {
-                    game.name = appearance.title.trim().into();
-                }
-            }
             if game.name.is_empty() {
                 game.name = game
                     .sources
@@ -564,6 +783,12 @@ impl App {
                     .map(|&i| title_from_path(&self.sources[i].path))
                     .filter(|t| !t.is_empty())
                     .unwrap_or_else(|| "Untitled game".into());
+            }
+            game.default_title = game.name.clone();
+            if let Some(appearance) = self.appearances.get(&game.key) {
+                if !appearance.title.trim().is_empty() {
+                    game.name = appearance.title.trim().into();
+                }
             }
             let bases: Vec<&Source> = game
                 .sources
@@ -598,6 +823,10 @@ impl App {
                     continue;
                 }
             }
+            if game.kind == SourceKind::Nup && self.nup_platform(bases[0]).is_none() {
+                game.problem = "Select Switch 1 or Switch 2 for this NUP.".into();
+                continue;
+            }
             let folder = self
                 .output_dir
                 .clone()
@@ -623,10 +852,10 @@ impl App {
     /// Selected, supported native packages (decrypted NSP or XCI): the only
     /// sources with rebuild data and bundled firmware. Extracted trees have none.
     fn native_package(&self, game: &Game) -> bool {
-        !game.tree
+        game.kind == SourceKind::Native
             && game.sources.iter().any(|&index| {
                 let source = &self.sources[index];
-                source.selected && source.supported && !source.tree
+                source.selected && source.supported && source.kind == SourceKind::Native
             })
     }
 
@@ -634,7 +863,7 @@ impl App {
         game.sources
             .iter()
             .map(|&index| &self.sources[index])
-            .filter(|source| source.selected && source.supported && !source.tree)
+            .filter(|source| source.selected && source.supported && source.kind == SourceKind::Native)
             .fold(0u64, |bytes, source| {
                 bytes.saturating_add(source.firmware_bytes)
             })
@@ -649,6 +878,7 @@ impl App {
         for &index in game.sources.iter().rev() {
             let source = self.sources.remove(index);
             self.textures.remove(&source.path);
+            self.nup_platforms.remove(&source.path);
         }
         self.appearances.remove(&game.key);
         self.omitted_firmware.remove(&game.key);
@@ -657,19 +887,35 @@ impl App {
         }
     }
 
+    fn nup_platform(&self, source: &Source) -> Option<Platform> {
+        source
+            .nup_platform
+            .or_else(|| self.nup_platforms.get(&source.path).copied())
+            .filter(|platform| *platform != Platform::Unknown)
+    }
+
     fn convert(&mut self) {
         for game in self.games() {
             let Some(output) = &game.output else {
                 continue;
             };
-            let mut args = vec![if game.tree { "pack-tree" } else { "pack" }.to_string()];
-            args.extend(
-                game.sources
-                    .iter()
-                    .map(|&i| &self.sources[i])
-                    .filter(|s| s.selected)
-                    .map(|s| text(&s.path)),
-            );
+            let selected: Vec<_> = game
+                .sources
+                .iter()
+                .map(|&i| &self.sources[i])
+                .filter(|s| s.selected && s.supported)
+                .collect();
+            let source_bytes = selected
+                .iter()
+                .map(|s| s.size)
+                .fold(0u64, u64::saturating_add);
+            let command = match game.kind {
+                SourceKind::Native => "pack",
+                SourceKind::Extracted => "pack-tree",
+                SourceKind::Nup => "pack-nup",
+            };
+            let mut args = vec![command.to_owned()];
+            args.extend(selected.iter().map(|s| text(&s.path)));
             args.push(text(output));
             if self.no_compress {
                 args.push("--no-compress".into());
@@ -677,7 +923,7 @@ impl App {
                 args.push("--level".into());
                 args.push(self.level.to_string());
             }
-            if !game.tree {
+            if game.kind == SourceKind::Native {
                 let omit_firmware = self.omits_firmware(&game);
                 if !self.recipe || omit_firmware {
                     args.push("--no-recipe".into());
@@ -686,36 +932,43 @@ impl App {
                     args.push("--omit-firmware".into());
                 }
             }
-            if game.tree && self.platform != 0 {
-                args.extend([
-                    "--platform".into(),
-                    if self.platform == 1 {
-                        "switch1"
-                    } else {
-                        "switch2"
-                    }
-                    .into(),
-                ]);
+            if game.kind == SourceKind::Nup {
+                let platform = match selected.first().and_then(|s| self.nup_platform(s)) {
+                    Some(Platform::Switch1) => "switch1",
+                    Some(Platform::Switch2) => "switch2",
+                    _ => continue,
+                };
+                args.extend(["--platform".into(), platform.into()]);
             }
-            if game.tree {
+            if game.kind != SourceKind::Native {
                 // One NX file only: no review files beside it.
                 args.push("--no-trail".into());
             }
             args.push("--frontend".into());
             self.push(format!("Converting {}", game.name), args, Purpose::Pack);
-            // Missing fields only: the typed title, else the one from the file name.
+            let job = self.queue.back_mut().unwrap();
+            job.source_bytes = (source_bytes != 0).then_some(source_bytes);
             let appearance = self.appearances.get(&game.key);
             let title = appearance
                 .map(|a| a.title.trim())
-                .filter(|t| !t.is_empty())
+                .filter(|t| !t.is_empty() && *t != game.default_title)
                 .or((game.missing_title && game.name != "Untitled game").then_some(&*game.name))
+                .map(String::from);
+            let publisher = appearance
+                .map(|a| a.publisher.trim())
+                .filter(|p| !p.is_empty() && *p != game.publisher)
                 .map(String::from);
             let icon = appearance
                 .and_then(|a| a.icon.clone())
                 .map(|b| (nxformat_packer::MediaType::JpegIcon, b));
-            if title.is_some() || icon.is_some() {
-                self.queue.back_mut().unwrap().display =
-                    Some(nxformat_packer::DisplayFallback { title, icon });
+            if title.is_some() || publisher.is_some() || icon.is_some() {
+                job.display = Some(nxformat_packer::DisplayFallback {
+                    title,
+                    publisher,
+                    icon,
+                    replace_existing: true,
+                    application_id: Some(game.application),
+                });
             }
         }
     }
@@ -744,10 +997,35 @@ impl App {
                             art,
                             center: [0.5, 0.5],
                             zoom: 1.0,
+                            size: artwork::DEFAULT_SIZE,
                         })
                     }
                     Err(error) => self.status = error,
                 }
+            }
+        }
+        if let Some(rx) = &self.crop_rx {
+            match rx.try_recv() {
+                Ok((key, result)) => {
+                    self.crop_rx = None;
+                    match result {
+                        Ok((bytes, preview)) => {
+                            let appearance = self.appearances.entry(key).or_default();
+                            appearance.texture = Some(ctx.load_texture(
+                                "cropped artwork",
+                                preview,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                            appearance.icon = Some(Arc::from(bytes));
+                        }
+                        Err(error) => self.status = error,
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.crop_rx = None;
+                    self.status = "Artwork processing stopped unexpectedly.".into();
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
         let Some(running) = self.running.as_mut() else {
@@ -771,9 +1049,21 @@ impl App {
                         self.sources.push(source);
                     }
                 }
-                Message::Cover(bytes) => {
-                    if let Ok(mut art) = artwork::Artwork::decode(&bytes) {
-                        self.archive_cover = Some(art.texture(ctx).clone());
+                Message::Metadata(mut metadata) => {
+                    self.archive_cover = metadata
+                        .as_ref()
+                        .and_then(|m| m.icon.as_deref())
+                        .and_then(|bytes| artwork::Artwork::decode(bytes).ok())
+                        .map(|mut art| art.texture(ctx).clone());
+                    if let Some(m) = &mut metadata {
+                        m.original_texture = m
+                            .original
+                            .as_deref()
+                            .and_then(|bytes| artwork::Artwork::decode(bytes).ok())
+                            .map(|mut art| art.texture(ctx).clone());
+                    }
+                    if let Some(archive) = &mut self.archive {
+                        archive.metadata = metadata;
                     }
                 }
                 Message::Line(error, line) => {
@@ -814,7 +1104,7 @@ impl App {
         match running.job.purpose {
             Purpose::Scan => self.scanned(&records, result.as_ref().err()),
             Purpose::Contents => self.contents(&records),
-            Purpose::Pack | Purpose::Edit => {}
+            Purpose::Pack | Purpose::Edit | Purpose::Export => {}
         }
         for r in &records {
             match r[..] {
@@ -864,6 +1154,15 @@ impl App {
             }
         };
         if running.job.purpose == Purpose::Edit {
+            if result.is_ok()
+                && running
+                    .job
+                    .args
+                    .first()
+                    .is_some_and(|cmd| cmd == "set-metadata")
+            {
+                self.appearances.remove(ARCHIVE_ARTWORK);
+            }
             self.reload_archive();
         }
         if running.job.purpose == Purpose::Pack && result.is_ok() && !cancelled {
@@ -880,6 +1179,7 @@ impl App {
                     .take_while(|a| *a != output)
                     .collect();
                 self.sources.retain(|s| !used.contains(&&text(&s.path)));
+                self.nup_platforms.retain(|p, _| !used.contains(&&text(p)));
             }
         }
     }
@@ -969,6 +1269,16 @@ impl App {
         std::thread::spawn(move || {
             let result = artwork::Artwork::load(&path);
             let _ = tx.send((key, result));
+        });
+    }
+
+    fn encode_artwork(&mut self, crop: artwork::Crop, ctx: egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        self.crop_rx = Some(rx);
+        std::thread::spawn(move || {
+            let result = crop.art.crop(crop.center, crop.zoom, crop.size);
+            let _ = tx.send((crop.key, result));
+            ctx.request_repaint();
         });
     }
 }

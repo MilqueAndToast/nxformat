@@ -1,6 +1,6 @@
 //! Lightweight source discovery on the command worker, never on the UI thread.
-use super::{Content, Source};
-use nxformat_packer::{import, native, CancellationToken};
+use super::{Content, Source, SourceKind};
+use nxformat_packer::{import, native, CancellationToken, Platform, SnapshotType};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -17,16 +17,19 @@ fn bounded(path: &Path, limit: u64) -> Option<Vec<u8>> {
     (bytes.len() as u64 <= limit).then_some(bytes)
 }
 
-fn title(nacp: &[u8]) -> String {
+fn display_text(nacp: &[u8]) -> (String, String) {
     if nacp.len() < 0x4000 {
-        return String::new();
+        return Default::default();
     }
+    let text = |field: &[u8]| {
+        let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+        String::from_utf8_lossy(&field[..end]).trim().to_owned()
+    };
     (0..16)
         .find_map(|i| {
-            let field = &nacp[i * 0x300..i * 0x300 + 0x200];
-            let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
-            let text = std::str::from_utf8(&field[..end]).ok()?.trim();
-            (!text.is_empty()).then(|| text.to_owned())
+            let start = i * 0x300;
+            let name = text(&nacp[start..start + 0x200]);
+            (!name.is_empty()).then(|| (name, text(&nacp[start + 0x200..start + 0x300])))
         })
         .unwrap_or_default()
 }
@@ -38,7 +41,7 @@ fn extracted(path: &Path) -> Option<Source> {
     }
     let mut source = Source {
         path: path.to_owned(),
-        tree: true,
+        kind: SourceKind::Extracted,
         supported: true,
         selected: true,
         ..Default::default()
@@ -66,17 +69,14 @@ fn extracted(path: &Path) -> Option<Source> {
             .find_map(|&profile| import::structures::validate_npdm(&bytes, profile).ok())
             .map(|n| n.program_id)
         });
-        let name = bounded(&root.join("control.nacp"), 1024 * 1024)
-            .map(|b| title(&b))
+        let (name, publisher) = bounded(&root.join("control.nacp"), 1024 * 1024)
+            .map(|b| display_text(&b))
             .unwrap_or_default();
         // Root artwork is optional for extracted layouts. No recursive media search.
-        if source.icon.is_none() {
-            for name in ["icon_AmericanEnglish.dat"] {
-                if let Some(bytes) = bounded(&root.join(name), 16 * 1024 * 1024) {
-                    source.icon = Some(bytes);
-                    break;
-                }
-            }
+        if source.icon.is_none() && kind != "dlc" {
+            source.icon = native::NACP_LANGUAGE_MAP.iter().find_map(|(language, _)| {
+                bounded(&root.join(format!("icon_{language}.dat")), 16 * 1024 * 1024)
+            });
         }
         // updates/<version>/ and dlc/<id>/<version>/: the folder names the version.
         let version = if kind == "base" {
@@ -92,6 +92,7 @@ fn extracted(path: &Path) -> Option<Source> {
             application: program.unwrap_or(0),
             version,
             name,
+            publisher,
             ..Default::default()
         });
     }
@@ -122,9 +123,87 @@ fn extracted(path: &Path) -> Option<Source> {
     Some(source)
 }
 
+fn is_nup(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("nup"))
+}
+
+fn nup(path: PathBuf, token: &CancellationToken) -> Source {
+    let mut source = Source {
+        kind: SourceKind::Nup,
+        path,
+        ..Default::default()
+    };
+    match import::inspect_nup(&source.path, &import::ImportLimits::for_nup(), token) {
+        Ok(info) => {
+            source.size = info.size;
+            source.supported = true;
+            source.selected = true;
+            source.nup_platform = (info.platform != Platform::Unknown).then_some(info.platform);
+            source.icon = info.icon;
+            let title = info.title.unwrap_or_default();
+            let publisher = info.publisher.unwrap_or_default();
+            source.contents = info
+                .packages
+                .into_iter()
+                .map(|package| {
+                    let kind = match package.kind {
+                        SnapshotType::Base => "base",
+                        SnapshotType::Update => "update",
+                        SnapshotType::StandaloneUpdate => "standalone",
+                        SnapshotType::Dlc => "dlc",
+                        SnapshotType::Unknown => "other",
+                    };
+                    Content {
+                        kind: kind.into(),
+                        application: info.application_id,
+                        version: package.version,
+                        display: package.display_version.unwrap_or_default(),
+                        name: title.clone(),
+                        publisher: publisher.clone(),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+        }
+        Err(error) => source.issue = error.to_string(),
+    }
+    source
+}
+
+fn collect_nups(
+    dir: &Path,
+    depth: u32,
+    options: &native::InventoryOptions,
+    paths: &mut Vec<PathBuf>,
+    token: &CancellationToken,
+) -> Result<(), String> {
+    if depth >= options.max_directory_depth {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        if token.is_cancelled() {
+            return Err("Cancelled".into());
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_dir() {
+            collect_nups(&entry.path(), depth + 1, options, paths, token)?;
+        } else if kind.is_file() && is_nup(&entry.path()) {
+            if paths.len() >= options.max_sources {
+                return Err("Too many NUP sources.".into());
+            }
+            paths.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
 pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source>, String> {
     let mut result = Vec::new();
     let mut packages = Vec::new();
+    let mut nups = Vec::new();
+    let options = native::InventoryOptions::default();
     for path in paths {
         if token.is_cancelled() {
             return Err("Cancelled".into());
@@ -134,12 +213,23 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
                 result.push(source);
                 continue;
             }
+            collect_nups(&path, 0, &options, &mut nups, token)?;
+        } else if is_nup(&path) {
+            nups.push(path);
+            continue;
         }
         packages.push(path);
     }
+    nups.sort();
+    nups.dedup();
+    for path in nups {
+        if token.is_cancelled() {
+            return Err("Cancelled".into());
+        }
+        result.push(nup(path, token));
+    }
     if !packages.is_empty() {
-        let inventory = native::inventory(&packages, &native::InventoryOptions::default())
-            .map_err(|e| e.to_string())?;
+        let inventory = native::inventory(&packages, &options).map_err(|e| e.to_string())?;
         for s in inventory.sources {
             if token.is_cancelled() {
                 return Err("Cancelled".into());
@@ -175,15 +265,14 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
                     ..Default::default()
                 };
                 if let Some(control) = m.meta.control {
-                    content.name = control
+                    let title = control
                         .titles
                         .iter()
-                        .filter_map(|t| t.name.as_ref())
-                        .find(|s| !s.trim().is_empty())
-                        .cloned()
-                        .unwrap_or_default();
+                        .find(|t| t.name.as_ref().is_some_and(|s| !s.trim().is_empty()));
+                    content.name = title.and_then(|t| t.name.clone()).unwrap_or_default();
+                    content.publisher = title.and_then(|t| t.publisher.clone()).unwrap_or_default();
                     content.display = control.display_version.unwrap_or_default();
-                    if source.icon.is_none() {
+                    if source.icon.is_none() && kind != "dlc" {
                         let language = control
                             .titles
                             .iter()

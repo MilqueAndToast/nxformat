@@ -790,6 +790,211 @@ fn npdm_profile(npdm: &[u8]) -> &'static str {
     "none"
 }
 
+fn package_role(p: &Package, has_base: bool) -> Result<(crate::SnapshotType, u64), WriterError> {
+    use crate::SnapshotType;
+    match (p.kind, p.flags) {
+        (0, 0) => Ok((SnapshotType::Base, p.title_id)),
+        (1, 0 | 1) => {
+            if !matches!(p.title_id & 0xfff, 0 | 0x800) {
+                return Err(bad(&format!(
+                    "update title ID {:016x} is neither an application ID nor its patch ID",
+                    p.title_id
+                )));
+            }
+            let standalone = p.flags == 1;
+            if standalone == has_base {
+                return Err(unsupported(if standalone {
+                    "standalone update beside a base package"
+                } else {
+                    "update without a base package and without the standalone flag"
+                }));
+            }
+            let kind = if standalone {
+                SnapshotType::StandaloneUpdate
+            } else {
+                SnapshotType::Update
+            };
+            Ok((kind, p.title_id & !0xfff))
+        }
+        (2, 0) => {
+            let application = (p.title_id & !0xfff)
+                .checked_sub(0x1000)
+                .filter(|_| p.title_id & 0xfff != 0)
+                .ok_or_else(|| bad("add-on title ID has no add-on index"))?;
+            Ok((SnapshotType::Dlc, application))
+        }
+        (0..=2, _) => Err(bad("unknown package flags")),
+        _ => Err(unsupported("reserved NUP package kind")),
+    }
+}
+
+pub struct NupPackageInfo {
+    pub kind: crate::SnapshotType,
+    pub version: u32,
+    pub display_version: Option<String>,
+}
+
+pub struct NupInfo {
+    pub application_id: u64,
+    pub platform: crate::Platform,
+    pub size: u64,
+    pub title: Option<String>,
+    pub publisher: Option<String>,
+    pub icon: Option<Vec<u8>>,
+    pub packages: Vec<NupPackageInfo>,
+}
+
+/// Inspect the TOC and display metadata without staging or decoding game data.
+/// Only an optional main.npdm is decoded for platform detection.
+pub fn inspect_nup(
+    path: &Path,
+    limits: &ImportLimits,
+    token: &crate::CancellationToken,
+) -> Result<NupInfo, WriterError> {
+    use crate::{Platform, SnapshotType};
+    limits.validate()?;
+    cancelled(token)?;
+    let mut file = File::open(path)?;
+    let (toc, size) = read_toc(&mut file, limits)?;
+    if toc.packages.len() > limits.max_snapshots {
+        return Err(limit("NUP snapshot budget"));
+    }
+    let mut bases = toc.packages.iter().filter(|p| p.kind == 0 && p.flags == 0);
+    let base = bases.next();
+    if bases.next().is_some() {
+        return Err(bad("more than one base package"));
+    }
+    let main = base
+        .or_else(|| {
+            toc.packages
+                .iter()
+                .filter(|p| p.kind == 1 && p.flags == 1)
+                .max_by_key(|p| p.version)
+        })
+        .ok_or_else(|| bad("no base or standalone update package to convert"))?;
+    let (_, application_id) = package_role(main, base.is_some())?;
+    let platform = match application_id >> 56 {
+        0x04 => Platform::Switch2,
+        0x01 if inspect_npdm(path, &toc, main, limits, token)? => Platform::Switch1,
+        _ => Platform::Unknown,
+    };
+    let mut info = NupInfo {
+        application_id,
+        platform,
+        size,
+        title: None,
+        publisher: None,
+        icon: None,
+        packages: Vec::new(),
+    };
+    let mut ordered: Vec<_> = toc.packages.iter().collect();
+    ordered.sort_by_key(|p| (p.kind, p.version));
+    let mut metadata_bytes = 0u64;
+    for p in ordered {
+        cancelled(token)?;
+        let (kind, owner) = package_role(p, base.is_some())?;
+        if owner != application_id {
+            return Err(bad("package belongs to another application"));
+        }
+        let display_version = if kind != SnapshotType::Dlc {
+            metadata_bytes += u64::from(p.meta_size);
+            if metadata_bytes > limits.max_inventory_bytes {
+                return Err(limit("NUP display metadata exceeds the inspection budget"));
+            }
+            let mut meta = read_meta(&mut file, p, size)?;
+            if let Some(nacp) = &meta.nacp {
+                let (titles, version, _) = crate::native::parse_nacp_text(nacp);
+                if let Some(title) = titles.first() {
+                    meta.title = title.name.clone().or(meta.title);
+                    meta.publisher = title.publisher.clone().or(meta.publisher);
+                }
+                meta.display_version = version.or(meta.display_version);
+            }
+            let title = meta.title.or_else(|| {
+                meta.localized_titles
+                    .into_iter()
+                    .next()
+                    .map(|(_, title)| title)
+            });
+            if title.as_ref().is_some_and(|title| !title.trim().is_empty()) {
+                info.title = title;
+            }
+            if meta
+                .publisher
+                .as_ref()
+                .is_some_and(|publisher| !publisher.trim().is_empty())
+            {
+                info.publisher = meta.publisher;
+            }
+            // Prefer the base artwork so the editor can restore it after a custom selection.
+            if info.icon.is_none() {
+                info.icon = meta
+                    .icon
+                    .or_else(|| {
+                        meta.localized_icons
+                            .into_iter()
+                            .next()
+                            .map(|(_, icon)| icon)
+                    })
+                    .filter(|icon| icon.len() <= 16 * 1024 * 1024);
+            }
+            meta.display_version
+        } else {
+            None
+        };
+        info.packages.push(NupPackageInfo {
+            kind,
+            version: p.version,
+            display_version,
+        });
+    }
+    Ok(info)
+}
+
+fn inspect_npdm(
+    path: &Path,
+    toc: &Toc,
+    package: &Package,
+    limits: &ImportLimits,
+    token: &crate::CancellationToken,
+) -> Result<bool, WriterError> {
+    if package.exefs == NONE {
+        return Ok(false);
+    }
+    let mut tree = Tree::default();
+    toc.walk(
+        package.exefs,
+        "",
+        &mut tree,
+        &mut BTreeSet::new(),
+        1,
+        limits,
+    )?;
+    let Some(index) = tree.files.get("main.npdm") else {
+        return Ok(false);
+    };
+    let file = &toc.files[*index];
+    if file.size > 1024 * 1024 {
+        return Err(limit("NUP NPDM exceeds 1 MiB"));
+    }
+    let mut bytes = Vec::new();
+    NupExtent {
+        path: std::sync::Arc::new(path.to_owned()),
+        name: file.name.clone(),
+        offset: file.extent_offset,
+        stored: file.extent_size,
+        codec: file.codec,
+        size: file.size,
+        sha256: file.sha256,
+    }
+    .reader(token)?
+    .read_to_end(&mut bytes)?;
+    Ok(
+        super::structures::validate_npdm(&bytes, super::structures::NpdmProfile::MetaAcid2048V1)
+            .is_ok(),
+    )
+}
+
 /// Decode one extent into `out`, checking size and SHA-256.
 fn decode(
     source: &mut File,
@@ -1039,54 +1244,22 @@ fn stage_nup_bounded(
     let mut resolved = 0usize;
     for p in order {
         cancelled(token)?;
-        let (kind, application, key) = match (p.kind, p.flags) {
-            (0, 0) => ("base", p.title_id, "base".to_owned()),
-            (1, 0) | (1, 1) => {
-                // Real packages (Donkey Kong Bananza 3.2.0) carry the
-                // application ID; the native patch ID ends in 800.
-                if p.title_id & 0xfff != 0x800 && p.title_id & 0xfff != 0 {
-                    return Err(bad(&format!(
-                        "update title ID {:016x} is neither an application ID nor its patch ID",
-                        p.title_id
-                    )));
-                }
-                let standalone = p.flags == 1;
-                if standalone != base.is_none() {
-                    return Err(unsupported(if standalone {
-                        "standalone update beside a base package"
-                    } else {
-                        "update without a base package and without the standalone flag"
-                    }));
-                }
-                let kind = if standalone {
-                    "standalone-update"
-                } else {
-                    "update"
-                };
-                (kind, p.title_id & !0xfff, format!("update-{}", p.version))
+        if (p.kind, p.flags) == (2, 0) && nup_options.skip_addons {
+            skipped.push(SkippedAddon {
+                title_id: p.title_id,
+                version: p.version,
+            });
+            continue;
+        }
+        let (snapshot_type, application) = package_role(p, base.is_some())?;
+        let (kind, key) = match snapshot_type {
+            crate::SnapshotType::Base => ("base", "base".to_owned()),
+            crate::SnapshotType::Update => ("update", format!("update-{}", p.version)),
+            crate::SnapshotType::StandaloneUpdate => {
+                ("standalone-update", format!("update-{}", p.version))
             }
-            (2, 0) => {
-                if nup_options.skip_addons {
-                    skipped.push(SkippedAddon {
-                        title_id: p.title_id,
-                        version: p.version,
-                    });
-                    continue;
-                }
-                // No NCA, so no native Content ID: the add-on is stored by
-                // its title ID, which names its application.
-                if p.title_id & 0xfff == 0 || p.title_id & !0xfff < 0x1000 {
-                    return Err(bad("add-on title ID has no add-on index"));
-                }
-                let application = (p.title_id & !0xfff) - 0x1000;
-                (
-                    "dlc",
-                    application,
-                    format!("dlc-{}-{}", hex16(p.title_id), p.version),
-                )
-            }
-            (0..=2, _) => return Err(bad("unknown package flags")),
-            _ => return Err(unsupported("reserved NUP package kind")),
+            crate::SnapshotType::Dlc => ("dlc", format!("dlc-{}-{}", hex16(p.title_id), p.version)),
+            crate::SnapshotType::Unknown => return Err(unsupported("unknown NUP snapshot type")),
         };
         if let Some(b) = base {
             if application != b.title_id {

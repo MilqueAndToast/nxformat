@@ -20,8 +20,8 @@ pub use manifest::{
     addon_belongs_to, Composition, DeclarationManifest, ManifestSelection, SnapshotDeclaration,
 };
 pub use nup::{
-    check_nup, convert_nup, stage_nup, stage_nup_with_options, NupCheck, NupConversionStats,
-    NupOptions, NupStage, SkippedAddon,
+    check_nup, convert_nup, inspect_nup, stage_nup, stage_nup_with_options, NupCheck,
+    NupConversionStats, NupInfo, NupOptions, NupPackageInfo, NupStage, SkippedAddon,
 };
 use std::path::PathBuf;
 pub use tree::{
@@ -68,19 +68,31 @@ pub(crate) fn invalid(message: &str) -> WriterError {
     WriterError::new(WriterErrorKind::InvalidInput, message)
 }
 impl ImportLimits {
+    pub const MAX_NODES: usize = 1_000_000;
+    pub const MAX_INVENTORY_BYTES: u64 = 1024 * 1024 * 1024;
+
+    /// NUP inspection and conversion share the same bounded inventory profile.
+    pub fn for_nup() -> Self {
+        Self {
+            max_nodes: Self::MAX_NODES,
+            max_inventory_bytes: Self::MAX_INVENTORY_BYTES,
+            ..Self::default()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), WriterError> {
         if self.max_manifest_bytes == 0
             || self.max_manifest_bytes > 16 * 1024 * 1024
             || self.max_snapshots == 0
             || self.max_snapshots > 4096
             || self.max_nodes == 0
-            || self.max_nodes > 1_000_000
+            || self.max_nodes > Self::MAX_NODES
             || self.max_depth == 0
             || self.max_depth > 64
             || self.max_path_bytes == 0
             || self.max_path_bytes > 4096
             || self.max_inventory_bytes < 1024 * 1024
-            || self.max_inventory_bytes > 1024 * 1024 * 1024
+            || self.max_inventory_bytes > Self::MAX_INVENTORY_BYTES
             || self.max_file_bytes > i64::MAX as u64
             || self.max_total_bytes > i64::MAX as u64
             || self.max_segment_bytes > 1024 * 1024 * 1024

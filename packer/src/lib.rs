@@ -21,8 +21,8 @@ pub use model::{
 };
 pub use writer::{
     add_native_content, add_native_contents, compact_archive, edit_archive_metadata,
-    edit_archive_recipes, inspect_archive, inspect_snapshot_files, inspect_source_resources,
-    read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp, repack_archive,
+    edit_archive_recipes, extract_exefs, inspect_archive, inspect_snapshot_files, inspect_source_resources,
+    read_original_icon, read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp, repack_archive,
     write_archive, ApplicationSummary, ArchiveSummary, BlockSizing, CancellationToken,
     CompressionMode, IntegrityPolicy, MetadataEdit, MetadataSourceSelection, NativeAddRequest,
     NativeAddStats, ProgramSummary, ProgressCounter, RepackPlan, RepackStats,

@@ -429,6 +429,82 @@ fn is_primary(archive: &SourceArchive, snapshot: &SourceSnapshot) -> bool {
     })
 }
 
+/// Read the original artwork from a native base game's Control NCA.
+pub fn read_original_icon(
+    path: impl AsRef<Path>,
+    platform: Platform,
+    application_id: u64,
+    options: &WriterOptions,
+) -> Result<Option<Vec<u8>>, WriterError> {
+    validate_options(options)?;
+    let path = path.as_ref();
+    let mut file = File::open(path)?;
+    let mut budget = MemoryBudget {
+        current: 0,
+        peak: 0,
+        limit: options.max_memory_bytes,
+    };
+    let archive = parse_archive(&mut file, 0, options, &mut budget)?;
+    let mut bases = archive.snapshots.iter().filter(|s| {
+        s.key == (platform as u8, application_id)
+            && s.snapshot.snapshot_type == SnapshotType::Base as u8
+            && s.snapshot.content_id != [0; 16]
+            && is_primary(&archive, s)
+    });
+    let (Some(base), None) = (bases.next(), bases.next()) else {
+        return Ok(None);
+    };
+    let report = inspect_base(
+        path,
+        &mut file,
+        &archive,
+        base,
+        &InventoryOptions::default(),
+        options,
+        &mut NativeAddStats::default(),
+        &Rc::new(Cell::new(budget.limit.saturating_sub(budget.current))),
+    )?;
+    let Some(control) = report.metas.into_iter().find_map(|entry| {
+        (entry.meta.application_id == application_id
+            && entry.meta.meta_type == ContentMetaType::Application)
+            .then_some(entry.meta.control)
+            .flatten()
+    }) else {
+        return Ok(None);
+    };
+    let Some((_, mut offset, size, _)) = control
+        .icon_ranges
+        .iter()
+        .find(|(language, ..)| language == "AmericanEnglish")
+        .or_else(|| control.icon_ranges.first())
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    if size == 0 || size > 16 * 1024 * 1024 {
+        return Ok(None);
+    }
+    let mut location = None;
+    for (name, index) in snapshot_entries(&archive, base)? {
+        let length = archive.files[index as usize].size;
+        if offset < length {
+            if size <= length - offset {
+                location = Some((base.snapshot.identity, name));
+            }
+            break;
+        }
+        offset -= length;
+    }
+    let Some((identity, name)) = location else {
+        return Ok(None);
+    };
+    drop(archive);
+    drop(file);
+    let mut bytes = vec![0; size as usize];
+    read_snapshot_file_range(path, identity, &name, offset, &mut bytes, options)?;
+    Ok(Some(bytes))
+}
+
 fn select_base_family(
     archive: &SourceArchive,
     key: (u8, u64),
@@ -1281,30 +1357,224 @@ pub fn read_snapshot_file_range(
     {
         return Err(invalid("snapshot read exceeds file bounds"));
     }
+    let mut reader = snapshot_file_reader(&mut file, &archive, index, options)?;
+    reader.position = offset;
+    let mut temporary = vec![0u8; output.len()];
+    let result = reader.read_exact(&mut temporary);
+    cancelled(options)?;
+    result?;
+    output.copy_from_slice(&temporary);
+    Ok(())
+}
+
+fn snapshot_file_reader<'a>(
+    file: &'a mut File,
+    archive: &'a SourceArchive,
+    index: u32,
+    options: &'a WriterOptions,
+) -> Result<NativeReader<'a>, WriterError> {
+    let size = archive.files[index as usize].size;
     let mut decoder = zstd::bulk::Decompressor::new()?;
     decoder.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(20))?;
-    let mut reader = NativeReader {
-        file: &mut file,
-        archive: &archive,
+    Ok(NativeReader {
+        file,
+        archive,
         extents: vec![Extent {
             start: 0,
-            size: record.size,
+            size,
             file: index,
         }],
-        position: offset,
-        size: record.size,
+        position: 0,
+        size,
         frame: Vec::new(),
         logical: Vec::new(),
         cached: None,
         decoder,
         options,
         stored_read: 0,
-    };
-    let mut temporary = vec![0u8; output.len()];
-    let result = reader.read_exact(&mut temporary);
+    })
+}
+
+/// Export one snapshot's ExeFS to a new directory. The NX is opened read-only.
+pub fn extract_exefs(
+    path: impl AsRef<Path>,
+    identity: [u8; 32],
+    destination: impl AsRef<Path>,
+    options: &WriterOptions,
+) -> Result<(), WriterError> {
+    validate_options(options)?;
     cancelled(options)?;
-    result?;
-    output.copy_from_slice(&temporary);
+    let path = path.as_ref();
+    let destination = destination.as_ref();
+    let mut file = File::open(path)?;
+    let mut budget = MemoryBudget {
+        current: 0,
+        peak: 0,
+        limit: options.max_memory_bytes,
+    };
+    let archive = parse_archive(&mut file, 0, options, &mut budget)?;
+    let snapshot = archive
+        .snapshots
+        .iter()
+        .find(|s| s.snapshot.identity == identity)
+        .ok_or_else(|| invalid("snapshot identity is absent"))?;
+    if snapshot.snapshot.snapshot_type == SnapshotType::Dlc as u8 {
+        return Err(invalid("DLC does not have an ExeFS to extract"));
+    }
+    cancelled(options)?;
+    std::fs::create_dir(destination)?;
+    let result = (|| {
+        let root = &archive.directories[snapshot.snapshot.root as usize];
+        if let Some(exefs) = root.iter().find(|e| e.kind == 1 && e.name == "exefs") {
+            let mut nodes = Vec::new();
+            let mut total = 0;
+            visit_identity_tree(
+                exefs.target,
+                &[],
+                0,
+                &archive,
+                &mut HashSet::new(),
+                &mut nodes,
+                &mut total,
+            )?;
+            options.progress.add_total(total);
+            for node in nodes {
+                cancelled(options)?;
+                let path =
+                    std::str::from_utf8(&node.path).map_err(|_| bad("non-UTF8 ExeFS path"))?;
+                crate::import::portable_path(path, &crate::import::ImportLimits::default())?;
+                let target = crate::import::join(destination, path);
+                if let Some(index) = node.source_file {
+                    let record = &archive.files[index as usize];
+                    let mut reader = snapshot_file_reader(&mut file, &archive, index, options)?;
+                    export_exefs_file(
+                        &mut reader,
+                        &target,
+                        record.size,
+                        Some(record.digest),
+                        options,
+                    )?;
+                } else {
+                    std::fs::create_dir(target)?;
+                }
+            }
+        } else {
+            let (index, entries) =
+                native_exefs(path, &mut file, &archive, snapshot, &budget, options)?;
+            options
+                .progress
+                .add_total(entries.iter().map(|entry| entry.size).sum());
+            let mut reader = snapshot_file_reader(&mut file, &archive, index, options)?;
+            for entry in entries {
+                cancelled(options)?;
+                crate::import::portable_path(&entry.name, &crate::import::ImportLimits::default())?;
+                reader.seek(SeekFrom::Start(entry.offset))?;
+                export_exefs_file(
+                    &mut reader,
+                    &destination.join(entry.name),
+                    entry.size,
+                    None,
+                    options,
+                )?;
+            }
+        }
+        cancelled(options)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(destination);
+    }
+    result
+}
+
+fn native_exefs(
+    path: &Path,
+    file: &mut File,
+    archive: &SourceArchive,
+    snapshot: &SourceSnapshot,
+    budget: &MemoryBudget,
+    options: &WriterOptions,
+) -> Result<(u32, Vec<PartitionEntry>), WriterError> {
+    if snapshot.snapshot.content_id == [0; 16] {
+        return Err(invalid("the snapshot has no ExeFS"));
+    }
+    let inventory_options = InventoryOptions::default();
+    let metadata_budget = Rc::new(Cell::new(budget.limit.saturating_sub(budget.current)));
+    let report = inspect_base(
+        path,
+        file,
+        archive,
+        snapshot,
+        &inventory_options,
+        options,
+        &mut NativeAddStats::default(),
+        &metadata_budget,
+    )?;
+    let program = report
+        .metas
+        .iter()
+        .find(|m| m.meta.meta_content_id == Some(snapshot.snapshot.content_id))
+        .and_then(|m| {
+            m.meta
+                .programs
+                .iter()
+                .find(|p| Some(p.program_id) == snapshot.program_id)
+        })
+        .ok_or_else(|| invalid("the snapshot has no standalone Program NCA to extract"))?;
+    let name = format!("{}.nca", crate::import::hex(&program.content_id));
+    let index = snapshot_entries(archive, snapshot)?
+        .into_iter()
+        .find(|(path, _)| path.eq_ignore_ascii_case(&name))
+        .map(|(_, index)| index)
+        .ok_or_else(|| bad("snapshot Program NCA is absent"))?;
+    let size = archive.files[index as usize].size;
+    let mut reader = snapshot_file_reader(file, archive, index, options)?;
+    let mut source = Source::new(&mut reader, size).with_metadata_budget(metadata_budget);
+    let nca = native::nca::parse_nca(&mut source, 0, size)
+        .map_err(|_| bad("cannot read the decrypted Program NCA"))?;
+    let (section, entries) = nca
+        .partition(&mut source, &inventory_options)
+        .map_err(|e| bad(&format!("Program ExeFS: {e}")))?;
+    if !entries.iter().any(|entry| entry.name == "main") {
+        return Err(invalid("the Program NCA has no complete ExeFS"));
+    }
+    let verified = nca
+        .verify_partition(&mut source, section, &inventory_options)
+        .map_err(|e| bad(&format!("Program ExeFS: {e}")))?;
+    if !matches!(verified, native::VerificationState::Verified) {
+        return Err(bad("Program ExeFS could not be verified"));
+    }
+    Ok((index, entries))
+}
+
+fn export_exefs_file(
+    reader: &mut NativeReader<'_>,
+    target: &Path,
+    size: u64,
+    digest: Option<[u8; 32]>,
+    options: &WriterOptions,
+) -> Result<(), WriterError> {
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    let mut buffer = vec![0u8; 128 * 1024];
+    let mut remaining = size;
+    let mut hash = Sha256::new();
+    while remaining != 0 {
+        let n = reader.read_native(&mut buffer[..remaining.min(128 * 1024) as usize])?;
+        if n == 0 {
+            return Err(bad("ExeFS file is truncated"));
+        }
+        output.write_all(&buffer[..n])?;
+        if digest.is_some() {
+            hash.update(&buffer[..n]);
+        }
+        remaining -= n as u64;
+        options.progress.add_done(n as u64);
+    }
+    if digest.is_some_and(|expected| expected != hash.finish()) {
+        return Err(bad("ExeFS file SHA-256 mismatch"));
+    }
     Ok(())
 }
 
@@ -1500,6 +1770,73 @@ mod tests {
         )
         .unwrap()
         .is_some());
+    }
+
+    #[test]
+    fn edited_display_keeps_the_original_native_artwork() {
+        const APP: u64 = 0x0100_0000_0001_0000;
+        let id = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nx-native-art-{}-{id}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let spec = native::synthetic::TitleSpec::application(APP, 0, 1);
+        let original = spec.control.as_ref().unwrap().icon.clone();
+        let input = dir.join("base.nsp");
+        std::fs::write(
+            &input,
+            native::synthetic::dnsp(&native::synthetic::title_entries(&spec)),
+        )
+        .unwrap();
+        let inventory = native::associate(vec![native::inspect_source(
+            &input,
+            &InventoryOptions::default(),
+        )]);
+        let application = inventory.plan().applications[0]
+            .to_application_input(&|_| true, &|_| None)
+            .unwrap();
+        let platform = application.platform;
+        let archive = dir.join("game.nx");
+        let replacement = [0xff, 0xd8, 0xff, 0xe0, 0x7f];
+        let options = WriterOptions {
+            display_fallback: Some(crate::DisplayFallback {
+                title: Some("Custom title".into()),
+                publisher: Some("Custom publisher".into()),
+                icon: Some((MediaType::JpegIcon, Arc::from(replacement))),
+                replace_existing: true,
+                application_id: Some(APP),
+            }),
+            ..Default::default()
+        };
+        write_archive(ArchiveInput::new(vec![application]), &archive, &options).unwrap();
+        std::fs::remove_file(input).unwrap();
+        let summary = inspect_archive(&archive, &options, IntegrityPolicy::Strict).unwrap();
+        let identity = summary.applications[0].metadata_snapshot_identity.unwrap();
+        let display = read_snapshot_display(&archive, identity, &options, true).unwrap();
+        assert_eq!(display.title.as_deref(), Some("Custom title"));
+        assert_eq!(display.publisher.as_deref(), Some("Custom publisher"));
+        assert_eq!(display.icon.as_deref(), Some(replacement.as_slice()));
+        assert_eq!(
+            read_original_icon(&archive, platform, APP, &options).unwrap(),
+            Some(original.clone())
+        );
+        edit_archive_metadata(
+            &archive,
+            vec![MetadataEdit {
+                application_id: APP,
+                icon: Some(original.clone()),
+                ..Default::default()
+            }],
+            &options,
+            IntegrityPolicy::Fast,
+        )
+        .unwrap();
+        let restored = read_snapshot_display(&archive, identity, &options, true).unwrap();
+        assert_eq!(restored.icon, Some(original));
+        assert_eq!(restored.nacp, display.nacp);
+        inspect_archive(&archive, &options, IntegrityPolicy::Strict).unwrap();
+        let exefs = dir.join("exefs");
+        extract_exefs(&archive, identity, &exefs, &options).unwrap();
+        assert!(std::fs::read(exefs.join("main")).unwrap().starts_with(b"NSO0"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

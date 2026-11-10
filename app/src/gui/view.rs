@@ -1,6 +1,55 @@
 use super::*;
 use egui::{Color32, RichText};
 
+fn metadata_editor(
+    ui: &mut egui::Ui,
+    appearance: &mut Appearance,
+    cover: Option<&egui::TextureHandle>,
+    original: Option<(&egui::TextureHandle, Option<&[u8]>)>,
+) -> bool {
+    ui.label("Title");
+    ui.add(egui::TextEdit::singleline(&mut appearance.title).desired_width(f32::INFINITY));
+    ui.label("Publisher");
+    ui.add(egui::TextEdit::singleline(&mut appearance.publisher).desired_width(f32::INFINITY));
+    ui.add_space(8.0);
+    let (choose, reset) = ui
+        .horizontal(|ui| {
+            if let Some(texture) = appearance.texture.as_ref().or(cover) {
+                ui.add(
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(egui::vec2(56.0, 56.0))
+                        .corner_radius(8),
+                );
+            } else {
+                theme::brand(ui, 56.0);
+            }
+            ui.vertical(|ui| {
+                let choose = theme::button(ui, Icon::Image, "Choose artwork…", false).clicked();
+                let reset = if original.is_some() {
+                    ui.small_button("Restore original image").clicked()
+                } else if appearance.icon.is_some() {
+                    ui.small_button(if cover.is_some() {
+                        "Undo artwork change"
+                    } else {
+                        "Remove artwork"
+                    })
+                    .clicked()
+                } else {
+                    false
+                };
+                (choose, reset)
+            })
+            .inner
+        })
+        .inner;
+    if reset {
+        let restored = original.and_then(|(texture, bytes)| bytes.map(|bytes| (texture, bytes)));
+        appearance.icon = restored.map(|(_, bytes)| Arc::from(bytes));
+        appearance.texture = restored.map(|(texture, _)| texture.clone());
+    }
+    choose
+}
+
 impl App {
     fn choose_sources(&mut self, folder: bool) {
         if folder {
@@ -8,7 +57,7 @@ impl App {
                 self.scan(vec![path]);
             }
         } else if let Some(paths) = rfd::FileDialog::new()
-            .add_filter("Decrypted games", &["dnsp", "dxci", "nsp", "xci"])
+            .add_filter("Game sources", &["nup", "dnsp", "dxci", "nsp", "xci"])
             .pick_files()
         {
             self.scan(paths);
@@ -51,7 +100,7 @@ impl App {
                         RichText::new(if archive {
                             "Drop an NX archive here"
                         } else {
-                            "Drop an NX, a folder or decrypted files"
+                            "Drop an NX, a NUP, a folder or decrypted files"
                         })
                         .size(19.0)
                         .strong(),
@@ -59,7 +108,7 @@ impl App {
                     ui.label(theme::muted(if archive {
                         ".nx"
                     } else {
-                        "NX archives · Extracted folders · DNSP · DXCI"
+                        "NX archives · NUP · Extracted folders · DNSP · DXCI"
                     }));
                     ui.add_space(14.0);
                     if archive {
@@ -129,6 +178,7 @@ impl App {
                     self.textures.clear();
                     self.appearances.clear();
                     self.omitted_firmware.clear();
+                    self.nup_platforms.clear();
                     self.focused.clear();
                 }
                 if theme::button(ui, Icon::Folder, "Folder", false).clicked() {
@@ -222,10 +272,10 @@ impl App {
                                             )
                                             .on_hover_text(&game.name);
                                             ui.label(
-                                                theme::muted(if game.tree {
-                                                    "Extracted folder".into()
-                                                } else {
-                                                    format!(
+                                                theme::muted(match game.kind {
+                                                    SourceKind::Extracted => "Extracted folder".into(),
+                                                    SourceKind::Nup => format!("{:016X} · NUP", game.application),
+                                                    SourceKind::Native => format!(
                                                         "{:016X} · {} source{}",
                                                         game.application,
                                                         game.sources.len(),
@@ -234,7 +284,7 @@ impl App {
                                                         } else {
                                                             "s"
                                                         }
-                                                    )
+                                                    ),
                                                 })
                                                 .small(),
                                             );
@@ -273,10 +323,27 @@ impl App {
                                     )
                                     .on_hover_text(text(&source.path));
                                 });
-                                if !source.tree {
+                                if source.kind != SourceKind::Extracted {
                                     ui.label(theme::muted(bytes(source.size)).small());
                                 }
                             });
+                            if source.kind == SourceKind::Nup && source.nup_platform.is_none() {
+                                let platform = self.nup_platforms.entry(source.path.clone())
+                                    .or_insert(Platform::Unknown);
+                                ui.horizontal(|ui| {
+                                    ui.label("NUP platform");
+                                    egui::ComboBox::from_id_salt(("nup-platform", &source.path))
+                                        .selected_text(match platform {
+                                            Platform::Switch1 => "Switch 1",
+                                            Platform::Switch2 => "Switch 2",
+                                            Platform::Unknown => "Choose platform…",
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(platform, Platform::Switch1, "Switch 1");
+                                            ui.selectable_value(platform, Platform::Switch2, "Switch 2");
+                                        });
+                                });
+                            }
                             if !source.issue.is_empty() {
                                 ui.colored_label(ui.visuals().warn_fg_color, &source.issue);
                             }
@@ -348,30 +415,29 @@ impl App {
         egui::ScrollArea::vertical().show(ui,|ui| {
             ui.horizontal(|ui| {theme::icon(ui,Icon::Settings,18.0,ACCENT);ui.label(RichText::new("Configuration").size(18.0).strong());});
             ui.add_space(16.0);
-            ui.strong("Save location");
-            let folder=self.output_dir.as_ref().map(|p|text(p)).unwrap_or_else(||"Beside each source".into());
-            ui.add(egui::Label::new(theme::muted(&folder)).truncate()).on_hover_text(&folder);
             ui.horizontal(|ui| {
+                ui.strong("Save location");
                 if ui.button("Choose folder…").clicked(){if let Some(path)=rfd::FileDialog::new().pick_folder(){self.output_dir=Some(path);}}
                 if self.output_dir.is_some() && ui.small_button("Reset").clicked(){self.output_dir=None;}
             });
+            let folder=self.output_dir.as_ref().map(|p|text(p)).unwrap_or_else(||"Beside each source".into());
+            ui.add(egui::Label::new(theme::muted(&folder)).truncate()).on_hover_text(&folder);
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.strong("Compression");
                 theme::info(
                     ui,
-                    &["Compression", "None: store game data without compression.", "Small / Balanced / Maximum: increasing compression effort.", "Balanced is recommended for most games."],
+                    &["Compression", "None: store game data without compression.", "Normal / High / Maximum: increasing compression effort.", "Normal is the default."],
                 );
             });
             ui.horizontal(|ui| {
                 if ui.selectable_label(self.no_compress,"None").clicked(){self.no_compress=true;}
-                for (level,label) in [(1,"Small"),(3,"Balanced"),(13,"Maximum")] {
+                for (level,label) in [(1,"Normal"),(3,"High"),(13,"Maximum")] {
                     if ui.selectable_label(!self.no_compress && self.level==level,label).clicked(){self.no_compress=false;self.level=level;}
                 }
             });
-            ui.label(theme::muted("Balanced is recommended for most games.").small());
+            ui.label(theme::muted("Normal balances speed and size.").small());
             let games=self.games();
-            let has_trees=games.iter().any(|g|g.tree);
             // Rebuild data and firmware exist only for DNSP/DXCI packages.
             let has_packages=games.iter().any(|g|self.native_package(g));
             if games.iter().any(|game| self.firmware_bytes(game) != 0) {
@@ -385,28 +451,25 @@ impl App {
                     ui.label(theme::muted("Rebuild data is skipped for games whose firmware is omitted.").small());
                 }
             }
-            if has_trees {
-                ui.add_space(10.0);ui.strong("Extracted folder platform");
-                egui::ComboBox::from_id_salt("tree-platform").selected_text(["Automatic","Switch 1","Switch 2"][self.platform]).show_ui(ui,|ui|{
-                    for (i,label) in ["Automatic","Switch 1","Switch 2"].iter().enumerate(){ui.selectable_value(&mut self.platform,i,*label);}
+            if let Some(game) = games.iter().find(|g| g.key == self.focused).or(games.first()) {
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.strong("Metadata");
+                let original = game.sources.iter()
+                    .filter_map(|&i| self.sources.get(i))
+                    .filter(|s| s.selected && s.contents.iter().any(|c| c.kind == "base" || c.kind == "standalone"))
+                    .find_map(|s| self.textures.get(&s.path));
+                let appearance = self.appearances.entry(game.key.clone()).or_insert_with(|| Appearance {
+                    title: game.default_title.clone(),
+                    publisher: game.publisher.clone(),
+                    ..Default::default()
                 });
-                            }
-            if let Some(game)=games.iter().find(|g|g.key==self.focused) {
-                let has_icon=game.sources.iter().any(|&i|self.sources[i].icon.is_some());
-                if game.missing_title || !has_icon {
-                    ui.add_space(14.0);ui.separator();ui.add_space(6.0);
-                    ui.strong("Make it yours");
-                    ui.label(theme::muted("Fill in missing display information.").small());
-                    let appearance=self.appearances.entry(game.key.clone()).or_default();
-                    if game.missing_title {ui.add(egui::TextEdit::singleline(&mut appearance.title).hint_text(game.name.as_str()).desired_width(f32::INFINITY));}
-                    if !has_icon {
-                        if let Some(texture)=&appearance.texture {ui.add(egui::Image::new(texture).fit_to_exact_size(egui::vec2(80.0,80.0)).corner_radius(9));}
-                        let key=game.key.clone();
-                        let choose=theme::button(ui,Icon::Image,if appearance.icon.is_some(){"Change artwork"}else{"Choose artwork"},false).clicked();
-                        if appearance.icon.is_some() && ui.small_button("Remove artwork").clicked(){appearance.icon=None;appearance.texture=None;}
-                        if choose {if let Some(path)=rfd::FileDialog::new().add_filter("Artwork",&["png","jpg","jpeg"]).pick_file(){self.load_artwork(key,path);}}
-                        ui.label(theme::muted("Square · 256 × 256 px recommended\nJPEG or PNG · Crop before saving").small());
-                    }
+                let choose = ui.push_id(&game.key, |ui| {
+                    metadata_editor(ui, appearance, original, original.map(|texture| (texture, None)))
+                }).inner;
+                if choose {
+                    self.choose_artwork(game.key.clone());
                 }
             }
             ui.add_space(20.0);
@@ -416,6 +479,15 @@ impl App {
             });
             self.activity(ui);
         });
+    }
+
+    fn choose_artwork(&mut self, key: String) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Artwork", &["png", "jpg", "jpeg"])
+            .pick_file()
+        {
+            self.load_artwork(key, path);
+        }
     }
 
     /// The last status line and the command log.
@@ -445,8 +517,10 @@ impl App {
         let Some(running) = &self.running else {
             return;
         };
+        let packing = running.job.purpose == Purpose::Pack;
         let fraction = if running.total > 0 {
-            (running.done as f64 / running.total as f64).clamp(0.0, 1.0) as f32
+            let limit = if packing { 0.99 } else { 1.0 };
+            (running.done as f64 / running.total as f64).clamp(0.0, limit) as f32
         } else {
             0.0
         };
@@ -456,12 +530,20 @@ impl App {
             ui.add_space(20.0);
             ui.heading(&running.job.label);
             ui.add_space(12.0);
-            if running.total > 0 {
+            if let Some(size) = running.job.source_bytes {
+                ui.label(theme::muted(format!("Source files · {}", bytes(size))));
+            }
+            if packing && running.total > 0 && running.done >= running.total {
+                ui.label(theme::muted("Finishing conversion…"));
+            } else if running.total > 0 {
                 ui.label(
                     RichText::new(format!("{:.0}%", fraction * 100.0))
                         .size(48.0)
                         .color(ACCENT),
                 );
+                if packing {
+                    ui.label(theme::muted("Estimated progress · includes verification"));
+                }
             } else {
                 ui.spinner();
                 ui.label(theme::muted("Preparing and checking your content…"));
@@ -483,7 +565,7 @@ impl App {
                     format!(" · {} queued", self.queue.len())
                 }
             )));
-            if running.total > 0 {
+            if !packing && running.total > 0 {
                 ui.label(theme::muted(format!(
                     "{} / {}",
                     bytes(running.done),
@@ -511,36 +593,55 @@ impl App {
         };
         let path = text(&archive.path);
         let mut action = None;
-        ui.horizontal(|ui| {
-            if let Some(texture) = &self.archive_cover {
-                ui.add(
-                    egui::Image::new(texture)
-                        .fit_to_exact_size(egui::vec2(80.0, 80.0))
-                        .corner_radius(12),
-                );
-            } else {
-                theme::brand(ui, 80.0);
-            }
-            ui.vertical(|ui| {
-                let title = archive
-                    .snapshots
-                    .iter()
-                    .find(|s| !s.name.is_empty())
-                    .map(|s| s.name.clone())
-                    .unwrap_or_else(|| file_name(&archive.path));
-                ui.heading(title);
-                ui.label(theme::muted(format!(
-                    "{} · {} snapshots",
-                    bytes(archive.size),
-                    archive.snapshots.len()
-                )));
-                ui.add(egui::Label::new(theme::muted(file_name(&archive.path)).small()).truncate())
-                    .on_hover_text(&path);
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Open another…").clicked() {
-                    action = Some(("open".into(), vec![]));
+        theme::card().inner_margin(16).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                if let Some(texture) = &self.archive_cover {
+                    ui.add(
+                        egui::Image::new(texture)
+                            .fit_to_exact_size(egui::vec2(80.0, 80.0))
+                            .corner_radius(12),
+                    );
+                } else {
+                    theme::brand(ui, 80.0);
                 }
+                ui.vertical(|ui| {
+                    let title = archive
+                        .metadata
+                        .as_ref()
+                        .map(|m| m.title.clone())
+                        .filter(|title| !title.is_empty())
+                        .or_else(|| {
+                            archive
+                                .snapshots
+                                .iter()
+                                .find(|s| !s.name.is_empty())
+                                .map(|s| s.name.clone())
+                        })
+                        .unwrap_or_else(|| file_name(&archive.path));
+                    ui.heading(title);
+                    if let Some(metadata) = archive
+                        .metadata
+                        .as_ref()
+                        .filter(|m| !m.publisher.is_empty())
+                    {
+                        ui.label(theme::muted(&metadata.publisher));
+                    }
+                    ui.label(theme::muted(format!(
+                        "{} · {} snapshots",
+                        bytes(archive.size),
+                        archive.snapshots.len()
+                    )));
+                    ui.add(
+                        egui::Label::new(theme::muted(file_name(&archive.path)).small()).truncate(),
+                    )
+                    .on_hover_text(&path);
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Open another…").clicked() {
+                        action = Some(("open".into(), vec![]));
+                    }
+                });
             });
         });
         ui.add_space(18.0);
@@ -583,8 +684,11 @@ impl App {
         }
         ui.add_space(16.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.strong("Archive contents");
+            ui.add_space(6.0);
             for snapshot in &archive.snapshots {
                 theme::card().inner_margin(14).show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
                         theme::icon(
                             ui,
@@ -618,27 +722,37 @@ impl App {
                                 .small(),
                             );
                         });
-                        if snapshot.kind != "base" {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("Remove").clicked() {
-                                        self.remove_confirmation = Some((
-                                            format!(
-                                                "Remove {} v{}?",
-                                                kind_name(&snapshot.kind),
-                                                snapshot.version
-                                            ),
-                                            vec![
-                                                "remove".into(),
-                                                path.clone(),
-                                                snapshot.identity.clone(),
-                                            ],
-                                        ));
-                                    }
-                                },
-                            );
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if snapshot.kind != "base" && ui.button("Remove").clicked() {
+                                self.remove_confirmation = Some((
+                                    format!(
+                                        "Remove {} v{}?",
+                                        kind_name(&snapshot.kind),
+                                        snapshot.version
+                                    ),
+                                    vec!["remove".into(), path.clone(), snapshot.identity.clone()],
+                                ));
+                            }
+                            if snapshot.kind != "dlc" && ui.button("Extract ExeFS…").clicked() {
+                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                    let short_id =
+                                        snapshot.identity.get(..8).unwrap_or(&snapshot.identity);
+                                    let output = folder.join(format!(
+                                        "{:016X}-v{}-{short_id}-exefs",
+                                        snapshot.title, snapshot.version
+                                    ));
+                                    action = Some((
+                                        "Extracting ExeFS".into(),
+                                        vec![
+                                            "extract-exefs".into(),
+                                            path.clone(),
+                                            snapshot.identity.clone(),
+                                            text(&output),
+                                        ],
+                                    ));
+                                }
+                            }
+                        });
                     });
                 });
                 ui.add_space(8.0);
@@ -671,14 +785,101 @@ impl App {
         if ui.button("Back to sources").clicked() {
             self.archive = None;
             self.archive_cover = None;
+            self.appearances.remove(ARCHIVE_ARTWORK);
         }
         self.activity(ui);
-        if let Some((label, args)) = action {
+        if let Some((label, mut args)) = action {
             if label == "open" {
                 self.choose_archive();
+            } else if args.first().is_some_and(|cmd| cmd == "extract-exefs") {
+                args.push("--frontend".into());
+                self.push(label, args, Purpose::Export);
             } else {
                 self.edit(label, args);
             }
+        }
+    }
+
+    fn archive_metadata_sidebar(&mut self, ui: &mut egui::Ui) {
+        let Some(archive) = &self.archive else {
+            return;
+        };
+        let Some(metadata) = archive
+            .metadata
+            .as_ref()
+            .filter(|metadata| metadata.editable)
+        else {
+            return;
+        };
+        let path = text(&archive.path);
+        let appearance = self
+            .appearances
+            .entry(ARCHIVE_ARTWORK.into())
+            .or_insert_with(|| Appearance {
+                title: metadata.title.clone(),
+                publisher: metadata.publisher.clone(),
+                ..Default::default()
+            });
+        let mut reset = false;
+        let mut edit = None;
+        let choose = egui::ScrollArea::vertical()
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    theme::icon(ui, Icon::Image, 18.0, ACCENT);
+                    ui.label(RichText::new("Metadata").size(18.0).strong());
+                });
+                ui.label(theme::muted(format!("{:016X}", metadata.id)));
+                ui.add_space(8.0);
+                let original = metadata.original_texture.as_ref().map(|texture| {
+                    let bytes = metadata
+                        .original
+                        .as_deref()
+                        .filter(|_| metadata.original != metadata.icon);
+                    (texture, bytes)
+                });
+                let pick = metadata_editor(ui, appearance, self.archive_cover.as_ref(), original);
+                let title = appearance.title.trim();
+                let publisher = appearance.publisher.trim();
+                let title_changed = !title.is_empty() && title != metadata.title.trim();
+                let publisher_changed =
+                    !publisher.is_empty() && publisher != metadata.publisher.trim();
+                let changed = title_changed || publisher_changed || appearance.icon.is_some();
+                let dirty = appearance.title != metadata.title
+                    || appearance.publisher != metadata.publisher
+                    || appearance.icon.is_some();
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled_ui(changed, |ui| {
+                            theme::button(ui, Icon::Check, "Save changes", true).clicked()
+                        })
+                        .inner
+                    {
+                        edit = Some(MetadataEdit {
+                            application_id: metadata.id,
+                            title: title_changed.then(|| title.to_owned()),
+                            publisher: publisher_changed.then(|| publisher.to_owned()),
+                            icon: appearance.icon.as_deref().map(<[u8]>::to_vec),
+                        });
+                    }
+                    reset = ui.add_enabled(dirty, egui::Button::new("Reset")).clicked();
+                });
+                pick
+            })
+            .inner;
+        if choose {
+            self.choose_artwork(ARCHIVE_ARTWORK.into());
+        }
+        if reset {
+            self.appearances.remove(ARCHIVE_ARTWORK);
+        }
+        if let Some(edit) = edit {
+            self.push(
+                "Saving metadata",
+                vec!["set-metadata".into(), path],
+                Purpose::Edit,
+            );
+            self.queue.back_mut().unwrap().metadata = Some(edit);
         }
     }
 }
@@ -702,42 +903,57 @@ impl eframe::App for App {
         if !dropped.is_empty() {
             self.drop_files(dropped);
         }
-        if self.art_rx.is_some() {
+        let artwork_pending = self.art_rx.is_some() || self.crop_rx.is_some();
+        if artwork_pending {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
         let busy = self.busy();
-        if !busy && self.archive.is_none() && !self.sources.is_empty() {
+        let archive_metadata = self
+            .archive
+            .as_ref()
+            .and_then(|archive| archive.metadata.as_ref())
+            .is_some_and(|metadata| metadata.editable);
+        if !busy && (archive_metadata || (self.archive.is_none() && !self.sources.is_empty())) {
             egui::Panel::right("configuration")
                 .exact_size(356.0)
                 .resizable(false)
                 .frame(egui::Frame::NONE.fill(theme::CARD).inner_margin(20))
                 .show(ui, |ui| {
-                    self.configuration(ui);
+                    ui.add_enabled_ui(!artwork_pending, |ui| {
+                        if archive_metadata {
+                            self.archive_metadata_sidebar(ui);
+                        } else {
+                            self.configuration(ui);
+                        }
+                    });
+                    if artwork_pending {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Preparing artwork…");
+                        });
+                    }
                 });
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(24))
             .show(ui, |ui| {
-                if busy {
-                    self.progress_view(ui);
-                } else if self.archive.is_some() {
-                    self.archive_view(ui);
-                } else if self.sources.is_empty() {
-                    self.empty(ui, false);
-                } else {
-                    self.source_list(ui);
-                }
+                ui.add_enabled_ui(!artwork_pending, |ui| {
+                    if busy {
+                        self.progress_view(ui);
+                    } else if self.archive.is_some() {
+                        self.archive_view(ui);
+                    } else if self.sources.is_empty() {
+                        self.empty(ui, false);
+                    } else {
+                        self.source_list(ui);
+                    }
+                });
             });
         let crop_answer = self.crop.as_mut().and_then(|c| c.show(&ctx));
         if let Some(accept) = crop_answer {
             let crop = self.crop.take().unwrap();
             if accept {
-                let bytes = crop.art.crop(crop.center, crop.zoom);
-                let appearance = self.appearances.entry(crop.key).or_default();
-                if let Ok(mut art) = artwork::Artwork::decode(&bytes) {
-                    appearance.texture = Some(art.texture(&ctx).clone());
-                    appearance.icon = Some(Arc::from(bytes));
-                }
+                self.encode_artwork(crop, ctx.clone());
             }
         }
         if let Some((label, args)) = self.remove_confirmation.clone() {

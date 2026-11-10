@@ -40,7 +40,7 @@ mod native_add;
 #[path = "reclaim.rs"]
 mod reclaim;
 pub use native_add::{
-    add_native_content, add_native_contents, read_snapshot_file_range, NativeAddRequest,
+    add_native_content, add_native_contents, extract_exefs, read_original_icon, read_snapshot_file_range, NativeAddRequest,
     NativeAddStats,
 };
 pub(crate) use native_add::{add_native_contents_with_recipes, verify_extracted_source_files};
@@ -4541,6 +4541,7 @@ fn inspect_archive_impl(
 #[derive(Default)]
 pub struct SnapshotDisplay {
     pub title: Option<String>,
+    pub publisher: Option<String>,
     pub icon: Option<Vec<u8>>,
     pub nacp: Option<Vec<u8>>,
 }
@@ -4589,6 +4590,7 @@ pub fn read_snapshot_display(
     };
     Ok(SnapshotDisplay {
         title: refs.title.clone(),
+        publisher: refs.publisher.clone(),
         icon: if include_icon {
             read(refs.icon, 16 * 1024 * 1024)?
         } else {
