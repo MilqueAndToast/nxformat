@@ -1,7 +1,7 @@
 # NXFormat 1.0.2
 
-NXFormat 1.0.2 fixes the titles of games converted from recent NUP files and
-makes the C library smaller. It includes the NXConvert desktop application and
+NXFormat 1.0.2 fixes the titles of games converted from recent NUP files,
+improves NXConvert, adds full NX extraction and makes the C library smaller. It includes the NXConvert desktop application and
 CLI, the Rust archive writer, the C API and the header-only C++17 reader. The
 NX format is unchanged: archives stay readable by 1.0.1 readers, and by 1.0.0
 readers when they hold no firmware.
@@ -13,6 +13,17 @@ readers when they hold no firmware.
   metadata types are shifted by one (NPDM = 0, NACP = 1, ...). Before, such
   games got the publisher as title, the build ID as publisher and the title as
   display version. Files with the specified types are read as before.
+
+**NXConvert**
+- Metadata sidebar to edit the title, publisher and icon, and restore the
+  original icon.
+- Large NUP sources are supported, the source size is shown apart from the
+  estimated progress, and a conversion cancels faster.
+- Folders of the same dump dropped one by one become a single NX.
+- `nxconvert extract ARCHIVE.nx NEW_FOLDER` and the **Extract all…** button
+  write every snapshot in the layout of a dump: `base/`, `updates/<version>/`
+  and `dlc/<title>/<version>/`, with `exefs/` and `romfs/`. Each file is
+  checked with SHA-256. Content kept as NCA files only gives its ExeFS.
 
 **Smaller C library**
 - The C API is built for size: about a third smaller. Zstandard and SHA-256
