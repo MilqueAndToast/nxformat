@@ -120,7 +120,7 @@ nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...] (rebuild the original files i
 nxconvert check-recipe ARCHIVE.nx (replay every recipe kept in the NX)\n\
 nxconvert scan SOURCE|FOLDER... (decrypted packages; @SOURCE, @CONTENT and @ISSUE lines)\n\
 nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @RESOURCE, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
-nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
+nxconvert extract-exefs ARCHIVE.nx [SNAPSHOT_IDENTITY] NEW_FOLDER (one snapshot, or every base and update as base/exefs and updates/<version>/exefs)\n\
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
@@ -1087,6 +1087,66 @@ fn dlc_title(path: &Path, s: &SnapshotSummary, options: &WriterOptions) -> u64 {
         })
         .unwrap_or(0)
 }
+/// Export the ExeFS of every base and update in the layout `pack-tree` reads:
+/// `base/exefs` and `updates/<version>/exefs`, under one folder per
+/// application when the archive holds several. Programs that would share a
+/// folder (multi-program games) get their Program ID appended. Returns the
+/// number of ExeFS written; `destination` must not exist and is removed on error.
+fn extract_all_exefs(
+    path: &Path,
+    destination: &Path,
+    options: &WriterOptions,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let summary = inspect_archive(path, options, IntegrityPolicy::Fast)?;
+    let several = summary.applications.len() > 1;
+    let mut jobs: Vec<(String, Option<u64>, [u8; 32])> = Vec::new();
+    for a in &summary.applications {
+        let prefix = if several {
+            format!("{:016x}/", a.application_id)
+        } else {
+            String::new()
+        };
+        for s in &a.snapshots {
+            let folder = match s.snapshot_type {
+                SnapshotType::Base => "base".to_owned(),
+                SnapshotType::Update | SnapshotType::StandaloneUpdate => {
+                    format!("updates/{}", s.numeric_version)
+                }
+                _ => continue,
+            };
+            // A stored tree without an exefs folder has nothing to export.
+            if s.content_id.is_none() {
+                let files =
+                    inspect_snapshot_files(path, s.identity, options, IntegrityPolicy::Fast)?;
+                if !files.iter().any(|f| f.path.starts_with("exefs/")) {
+                    continue;
+                }
+            }
+            jobs.push((format!("{prefix}{folder}"), s.program_id, s.identity));
+        }
+    }
+    if jobs.is_empty() {
+        return Err("the archive has no base or update with an ExeFS".into());
+    }
+    fs::create_dir(destination)?;
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        for (folder, program_id, identity) in &jobs {
+            let shared = jobs.iter().filter(|(other, ..)| other == folder).count() > 1;
+            let folder = match (shared, program_id) {
+                (true, Some(id)) => format!("{folder}-{id:016x}"),
+                _ => folder.clone(),
+            };
+            let target = destination.join(&folder);
+            fs::create_dir_all(&target)?;
+            extract_exefs(path, *identity, target.join("exefs"), options)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    result.map(|()| jobs.len())
+}
 /// Machine-readable contents of an NX archive.
 fn print_contents(path: &Path, options: &WriterOptions) -> Result<(), Box<dyn std::error::Error>> {
     let (summary, reclaimable, allocated) =
@@ -1547,6 +1607,12 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
             extract_exefs(&args[1], parse_identity(&args[2])?, &args[3], &options)?;
             drop(watch);
             println!("Extracted ExeFS to {}", args[3]);
+        }
+        ("extract-exefs", 3) => {
+            let watch = ProgressWatch::counter(o.frontend, &options.progress);
+            let count = extract_all_exefs(Path::new(&args[1]), Path::new(&args[2]), &options)?;
+            drop(watch);
+            println!("Extracted {count} ExeFS to {}", args[2]);
         }
         ("add", n) if n >= 3 => {
             let archive = Path::new(&args[1]);

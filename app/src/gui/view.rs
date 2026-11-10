@@ -675,6 +675,31 @@ impl App {
                     vec!["compact".into(), path.clone()],
                 ));
             }
+            if archive.snapshots.iter().any(|s| s.kind != "dlc")
+                && ui
+                    .button("Extract all ExeFS…")
+                    .on_hover_text(
+                        "Export the ExeFS of the game and every update: base/exefs and \
+                         updates/<version>/exefs, the layout of a dump.",
+                    )
+                    .clicked()
+            {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    let stem = archive
+                        .path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "archive".into());
+                    action = Some((
+                        "Extracting ExeFS".into(),
+                        vec![
+                            "extract-exefs".into(),
+                            path.clone(),
+                            text(&folder.join(format!("{stem}-exefs"))),
+                        ],
+                    ));
+                }
+            }
         });
         if archive.reclaimable > 0 {
             ui.label(theme::muted(format!(

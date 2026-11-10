@@ -1,7 +1,9 @@
 //! Native NXConvert window. Discovery and archive commands use the shared
 //! packer APIs on workers; the UI owns presentation and artwork cropping.
 use eframe::egui;
-use nxformat_packer::{cli, CancellationToken, IntegrityPolicy, MetadataEdit, Platform, WriterOptions};
+use nxformat_packer::{
+    cli, CancellationToken, IntegrityPolicy, MetadataEdit, Platform, WriterOptions,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod artwork;
@@ -820,9 +822,12 @@ impl App {
     fn games(&self) -> Vec<Game> {
         let mut games: Vec<Game> = Vec::new();
         for (index, source) in self.sources.iter().enumerate() {
-            let Some(first) = source.contents.iter()
+            let Some(first) = source
+                .contents
+                .iter()
                 .find(|c| c.kind == "base" || c.kind == "standalone")
-                .or_else(|| source.contents.first()) else {
+                .or_else(|| source.contents.first())
+            else {
                 continue;
             };
             let key = if source.kind == SourceKind::Native {
@@ -948,7 +953,9 @@ impl App {
         game.sources
             .iter()
             .map(|&index| &self.sources[index])
-            .filter(|source| source.selected && source.supported && source.kind == SourceKind::Native)
+            .filter(|source| {
+                source.selected && source.supported && source.kind == SourceKind::Native
+            })
             .fold(0u64, |bytes, source| {
                 bytes.saturating_add(source.firmware_bytes)
             })
@@ -1074,9 +1081,7 @@ impl App {
             let mut previous_defaults = None;
             if let Some(index) = existing {
                 let previous = &self.sources[index];
-                if previous.tree_roots.is_empty()
-                    || previous.tree_roots == source.tree_roots
-                {
+                if previous.tree_roots.is_empty() || previous.tree_roots == source.tree_roots {
                     continue;
                 }
                 if previous.supported && source.supported {
@@ -1084,8 +1089,7 @@ impl App {
                 }
                 let key = text(&source.path);
                 if self.appearances.contains_key(&key) {
-                    previous_defaults =
-                        self.games().into_iter().find(|game| game.key == key);
+                    previous_defaults = self.games().into_iter().find(|game| game.key == key);
                 }
                 self.textures.remove(&source.path);
             }

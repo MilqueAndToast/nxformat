@@ -1038,7 +1038,9 @@ fn preflight(
             cancelled(options)?;
             if s.snapshot_type != SnapshotType::Dlc {
                 if let Some(fallback) = options.display_fallback.as_ref().filter(|display| {
-                    display.application_id.is_none_or(|id| id == app.application_id)
+                    display
+                        .application_id
+                        .map_or(true, |id| id == app.application_id)
                 }) {
                     let metadata = s.metadata.get_or_insert_with(|| SnapshotMetadata {
                         title: None,
@@ -4946,12 +4948,12 @@ fn plan_inputs(
 mod repack;
 pub use repack::{
     add_native_content, add_native_contents, compact_archive, edit_archive_metadata,
-    edit_archive_recipes, extract_exefs, inspect_archive, inspect_snapshot_files, inspect_source_resources,
-    read_original_icon, read_snapshot_display, read_snapshot_file_range, read_snapshot_nacp, repack_archive,
-    ApplicationSummary, ArchiveSummary, IntegrityPolicy, MetadataEdit, MetadataSourceSelection,
-    NativeAddRequest, NativeAddStats, ProgramSummary, RepackPlan, RepackStats,
-    SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference, SnapshotSummary,
-    SourceFileSummary, VerificationStats, MAX_EMBEDDED_RECIPE_BYTES,
+    edit_archive_recipes, extract_exefs, inspect_archive, inspect_snapshot_files,
+    inspect_source_resources, read_original_icon, read_snapshot_display, read_snapshot_file_range,
+    read_snapshot_nacp, repack_archive, ApplicationSummary, ArchiveSummary, IntegrityPolicy,
+    MetadataEdit, MetadataSourceSelection, NativeAddRequest, NativeAddStats, ProgramSummary,
+    RepackPlan, RepackStats, SnapshotBlockReference, SnapshotDisplay, SnapshotFileReference,
+    SnapshotSummary, SourceFileSummary, VerificationStats, MAX_EMBEDDED_RECIPE_BYTES,
 };
 pub(crate) use repack::{
     add_native_contents_with_recipes, inspect_archive_with_space, seal_staged_generations,

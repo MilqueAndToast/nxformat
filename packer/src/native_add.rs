@@ -1533,13 +1533,13 @@ fn native_exefs(
         .map_err(|_| bad("cannot read the decrypted Program NCA"))?;
     let (section, entries) = nca
         .partition(&mut source, &inventory_options)
-        .map_err(|e| bad(&format!("Program ExeFS: {e}")))?;
+        .map_err(|e| bad(format!("Program ExeFS: {e}")))?;
     if !entries.iter().any(|entry| entry.name == "main") {
         return Err(invalid("the Program NCA has no complete ExeFS"));
     }
     let verified = nca
         .verify_partition(&mut source, section, &inventory_options)
-        .map_err(|e| bad(&format!("Program ExeFS: {e}")))?;
+        .map_err(|e| bad(format!("Program ExeFS: {e}")))?;
     if !matches!(verified, native::VerificationState::Verified) {
         return Err(bad("Program ExeFS could not be verified"));
     }
@@ -1835,7 +1835,9 @@ mod tests {
         inspect_archive(&archive, &options, IntegrityPolicy::Strict).unwrap();
         let exefs = dir.join("exefs");
         extract_exefs(&archive, identity, &exefs, &options).unwrap();
-        assert!(std::fs::read(exefs.join("main")).unwrap().starts_with(b"NSO0"));
+        assert!(std::fs::read(exefs.join("main"))
+            .unwrap()
+            .starts_with(b"NSO0"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
