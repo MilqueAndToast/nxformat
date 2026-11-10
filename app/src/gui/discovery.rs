@@ -2,6 +2,7 @@
 use super::{Content, Source, SourceKind};
 use nxformat_packer::{import, native, CancellationToken, Platform, SnapshotType};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -34,14 +35,19 @@ fn display_text(nacp: &[u8]) -> (String, String) {
         .unwrap_or_default()
 }
 
-fn extracted(path: &Path) -> Option<Source> {
-    let candidates = import::discover(path, &import::ImportLimits::default()).ok()?;
+fn extracted(path: &Path, selected: &BTreeSet<String>) -> Option<Source> {
+    let mut candidates = import::discover(path, &import::ImportLimits::default()).ok()?;
+    let package_has_base = candidates.iter().any(|c| c.relative_root == "base");
+    if !selected.is_empty() {
+        candidates.retain(|c| selected.contains(&c.relative_root));
+    }
     if candidates.is_empty() {
         return None;
     }
     let mut source = Source {
         path: path.to_owned(),
         kind: SourceKind::Extracted,
+        tree_roots: selected.iter().cloned().collect(),
         supported: true,
         selected: true,
         ..Default::default()
@@ -100,7 +106,9 @@ fn extracted(path: &Path) -> Option<Source> {
     // as in a dump whose base folder is empty. Its DLC may sit beside it.
     let has_base = source.contents.iter().any(|c| c.kind == "base");
     let mut updates = source.contents.iter_mut().filter(|c| c.kind == "update");
-    if let (false, Some(update), None) = (has_base, updates.next(), updates.next()) {
+    if let (false, Some(update), None) =
+        (has_base || package_has_base, updates.next(), updates.next())
+    {
         if update.application != 0 {
             update.kind = "standalone".into();
         }
@@ -113,7 +121,9 @@ fn extracted(path: &Path) -> Option<Source> {
         source.supported = false;
         source.selected = false;
         let base = path.join("base");
-        source.issue = if base.is_dir() && !base.join("exefs/main.npdm").is_file() {
+        source.issue = if package_has_base && !has_base {
+            "Add this dump's base folder to convert its updates and DLC."
+        } else if base.is_dir() && !base.join("exefs/main.npdm").is_file() {
             "The base folder has no game in it (no exefs/main.npdm): this dump holds only updates or DLC. Add the base game to convert it."
         } else {
             "No base game found (no exefs/main.npdm). Add the base game, or use an import manifest for this layout."
@@ -121,6 +131,47 @@ fn extracted(path: &Path) -> Option<Source> {
         .into();
     }
     Some(source)
+}
+
+/// Resolve a selected canonical component to its enclosing extracted dump.
+fn extracted_selection(path: &Path) -> Option<(PathBuf, Vec<String>)> {
+    for root in path.ancestors().skip(1).take(3) {
+        let parts: Vec<_> = path
+            .strip_prefix(root)
+            .ok()?
+            .iter()
+            .map(|part| part.to_str())
+            .collect::<Option<_>>()?;
+        let id = |value: &str| value.len() == 16 && u64::from_str_radix(value, 16).is_ok();
+        let known = match parts.as_slice() {
+            ["base" | "updates" | "dlc"] => true,
+            ["updates", version] => version.parse::<u32>().is_ok(),
+            ["dlc", title] => id(title),
+            ["dlc", title, version] => id(title) && version.parse::<u32>().is_ok(),
+            _ => false,
+        };
+        if !known {
+            continue;
+        }
+        let prefix = parts.join("/");
+        let Ok(candidates) = import::discover(root, &import::ImportLimits::default()) else {
+            continue;
+        };
+        let roots: Vec<_> = candidates
+            .into_iter()
+            .map(|c| c.relative_root)
+            .filter(|candidate| {
+                candidate == &prefix
+                    || candidate
+                        .strip_prefix(&prefix)
+                        .is_some_and(|tail| tail.starts_with('/'))
+            })
+            .collect();
+        if !roots.is_empty() {
+            return Some((root.to_owned(), roots));
+        }
+    }
+    None
 }
 
 fn is_nup(path: &Path) -> bool {
@@ -203,22 +254,45 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
     let mut result = Vec::new();
     let mut packages = Vec::new();
     let mut nups = Vec::new();
+    let mut extracted_dumps = BTreeMap::<PathBuf, Option<BTreeSet<String>>>::new();
     let options = native::InventoryOptions::default();
     for path in paths {
         if token.is_cancelled() {
             return Err("Cancelled".into());
         }
         if path.is_dir() {
-            if let Some(source) = extracted(&path) {
-                result.push(source);
+            let path = std::path::absolute(&path).map_err(|e| e.to_string())?;
+            if let Some((root, selected)) = extracted_selection(&path) {
+                if let Some(roots) = extracted_dumps
+                    .entry(root)
+                    .or_insert_with(|| Some(BTreeSet::new()))
+                {
+                    roots.extend(selected);
+                }
+                continue;
+            }
+            if import::discover(&path, &import::ImportLimits::default())
+                .is_ok_and(|c| !c.is_empty())
+            {
+                extracted_dumps.insert(path, None);
                 continue;
             }
             collect_nups(&path, 0, &options, &mut nups, token)?;
+            packages.push(path);
+            continue;
         } else if is_nup(&path) {
             nups.push(path);
             continue;
         }
         packages.push(path);
+    }
+    for (path, selected) in extracted_dumps {
+        if token.is_cancelled() {
+            return Err("Cancelled".into());
+        }
+        if let Some(source) = extracted(&path, &selected.unwrap_or_default()) {
+            result.push(source);
+        }
     }
     nups.sort();
     nups.dedup();

@@ -110,7 +110,7 @@ fn hex(b: &[u8]) -> String {
 fn usage() -> &'static str {
     "nxconvert inspect-tree TREE 2048|3072|none\n\
 nxconvert inspect-tree PACKAGE MANIFEST KEY\n\
-nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2]\n\
+nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2] [--tree-root RELATIVE_ROOT]...\n\
 nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc]\n\
 nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
@@ -163,6 +163,7 @@ struct Options {
     no_trail: bool,
     /// add-tree: the folder is one update tree of this version.
     update_version: Option<u32>,
+    tree_roots: std::collections::BTreeSet<String>,
 }
 fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error::Error>> {
     let mut positional = Vec::new();
@@ -228,6 +229,9 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
             "--workers" => o.workers = Some(value.parse()?),
             "--level" => o.level = Some(value.parse()?),
             "--update-version" => o.update_version = Some(value.parse()?),
+            "--tree-root" => {
+                o.tree_roots.insert(value);
+            }
             _ => return Err(usage().into()),
         }
     }
@@ -472,8 +476,19 @@ fn automatic_manifest(
     };
     limits.validate()?;
     let candidates = import::discover(package, &limits)?;
+    for root in &o.tree_roots {
+        if !candidates
+            .iter()
+            .any(|candidate| &candidate.relative_root == root)
+        {
+            return Err(format!("selected tree root {root:?} is absent from the dump").into());
+        }
+    }
     let mut trees = Vec::new();
     for c in &candidates {
+        if !o.tree_roots.is_empty() && !o.tree_roots.contains(&c.relative_root) {
+            continue;
+        }
         let r = role(&c.relative_root).ok_or_else(|| {
             format!(
                 "unknown layout directory {}; use an explicit manifest",
@@ -487,6 +502,9 @@ fn automatic_manifest(
         trees.push((c.relative_root.clone(), r));
     }
     let bases = trees.iter().filter(|t| matches!(t.1, Role::Base)).count();
+    if bases == 0 && candidates.iter().any(|c| c.relative_root == "base") {
+        return Err("select the dump's base folder with its updates and DLC".into());
+    }
     let updates = trees
         .iter()
         .filter(|t| matches!(t.1, Role::Update(..)))
@@ -531,7 +549,32 @@ fn automatic_manifest(
     let env = std::env::var("NX_TREE_PLATFORM").ok();
     let (platform, platform_origin) =
         platform_for(o.platform.as_deref().or(env.as_deref()), program, profile)?;
-    let walk = walk(package, limits.max_nodes)?;
+    let walk = if o.tree_roots.is_empty() {
+        walk(package, limits.max_nodes)?
+    } else {
+        let mut measured = Walk {
+            nodes: 0,
+            inventory_estimate: 0,
+            listings: Vec::new(),
+            bytes: 0,
+        };
+        for (root, _) in &trees {
+            let part = walk(&path_of(root), limits.max_nodes - measured.nodes)?;
+            measured.nodes += part.nodes;
+            measured.inventory_estimate += part.inventory_estimate;
+            measured.bytes += part.bytes;
+            measured
+                .listings
+                .extend(part.listings.into_iter().map(|path| {
+                    if root == "." {
+                        path
+                    } else {
+                        format!("{root}/{path}")
+                    }
+                }));
+        }
+        measured
+    };
     let mut text = "NXIMPORT\t1\n".to_owned();
     let mut facts = String::new();
     let mut keys = Vec::new();
@@ -1776,6 +1819,9 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let (mut args, o) = parse(argv)?;
+    if !o.tree_roots.is_empty() && (args.len() != 3 || args[0] != "pack-tree") {
+        return Err("--tree-root applies to automatic pack-tree only".into());
+    }
     if o.omit_firmware {
         if !matches!(args.first().map(String::as_str), Some("pack" | "add")) {
             return Err("--omit-firmware applies to native pack/add only".into());

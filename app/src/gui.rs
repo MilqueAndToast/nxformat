@@ -57,6 +57,7 @@ struct Content {
 #[derive(Clone, Default)]
 struct Source {
     kind: SourceKind,
+    tree_roots: Vec<String>,
     nup_platform: Option<Platform>,
     icon: Option<Vec<u8>>,
     path: PathBuf,
@@ -504,6 +505,77 @@ mod tests {
         let sources = sources.unwrap();
         assert!(sources[0].supported, "{}", sources[0].issue);
     }
+
+    #[test]
+    fn separate_extracted_folders_join_their_dump_without_adding_unselected_content() {
+        use super::{cli, CancellationToken, IntegrityPolicy, WriterOptions};
+        use nxformat_packer::import::{
+            structures::NpdmProfile,
+            synthetic::{npdm, nso},
+        };
+        use nxformat_packer::{inspect_archive, SnapshotType};
+
+        const ID: u64 = 0x0400_0000_0001_0000;
+        let dir = std::env::temp_dir().join(format!("nxconvert-split-dump-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let root = dir.join("Synthetic Game");
+        let base = root.join("base");
+        let update = root.join("updates/65536");
+        let unselected = root.join("updates/131072");
+        let dlc = root.join(format!("dlc/{:016x}/0", ID + 0x1001));
+        for (path, build) in [(&base, 0x41), (&update, 0x42), (&unselected, 0x43)] {
+            std::fs::create_dir_all(path.join("exefs")).unwrap();
+            std::fs::write(
+                path.join("exefs/main.npdm"),
+                npdm(ID, NpdmProfile::MetaAcid3072V1),
+            )
+            .unwrap();
+            std::fs::write(path.join("exefs/main"), nso(build, true)).unwrap();
+        }
+        std::fs::create_dir_all(dlc.join("romfs")).unwrap();
+        std::fs::write(dlc.join("romfs/addon.bin"), b"addon").unwrap();
+        let mut app = App::default();
+        let ctx = super::egui::Context::default();
+        let scan = |app: &mut App, paths| {
+            app.scan(paths);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while app.busy() {
+                app.poll(&ctx);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "source scan timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        scan(&mut app, vec![update]);
+        assert!(!app.sources[0].supported);
+        scan(&mut app, vec![base]);
+        scan(&mut app, vec![dlc]);
+        assert_eq!(app.sources.len(), 1);
+        assert_eq!(app.sources[0].path, root);
+        assert_eq!(app.sources[0].tree_roots.len(), 3);
+        let output = app.games().remove(0).output.unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        cli::run_with_display(
+            job.args,
+            None,
+            Some(CancellationToken::default()),
+            job.display,
+        )
+        .unwrap();
+        let archive =
+            inspect_archive(output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        let snapshots = &archive.applications[0].snapshots;
+        assert_eq!(snapshots.len(), 3);
+        assert!(snapshots
+            .iter()
+            .any(|s| s.snapshot_type == SnapshotType::Dlc));
+        assert!(snapshots.iter().any(|s| s.numeric_version == 65536));
+        assert!(!snapshots.iter().any(|s| s.numeric_version == 131072));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 fn bytes(size: u64) -> String {
@@ -652,17 +724,30 @@ impl App {
     }
 
     fn scan(&mut self, paths: Vec<PathBuf>) {
-        let fresh: Vec<String> = paths
-            .iter()
-            .filter(|p| !self.sources.iter().any(|s| &s.path == *p))
-            .map(|p| text(p))
+        let mut fresh: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|path| {
+                !self
+                    .sources
+                    .iter()
+                    .any(|s| &s.path == path && s.tree_roots.is_empty())
+            })
             .collect();
         if fresh.is_empty() {
             return;
         }
+        if fresh.iter().any(|p| p.is_dir()) {
+            // Reapply earlier component selections when the same dump is added to.
+            fresh.extend(
+                self.sources
+                    .iter()
+                    .filter(|source| source.kind == SourceKind::Extracted)
+                    .flat_map(|source| source.tree_roots.iter().map(|root| source.path.join(root))),
+            );
+        }
         self.archive = None;
         let mut args = vec!["scan".to_string()];
-        args.extend(fresh);
+        args.extend(fresh.iter().map(|p| text(p)));
         self.push("Reading the files", args, Purpose::Scan);
     }
 
@@ -940,6 +1025,11 @@ impl App {
                 };
                 args.extend(["--platform".into(), platform.into()]);
             }
+            if game.kind == SourceKind::Extracted {
+                for root in &selected[0].tree_roots {
+                    args.extend(["--tree-root".into(), root.clone()]);
+                }
+            }
             if game.kind != SourceKind::Native {
                 // One NX file only: no review files beside it.
                 args.push("--no-trail".into());
@@ -976,6 +1066,58 @@ impl App {
     fn edit(&mut self, label: String, mut args: Vec<String>) {
         args.push("--frontend".into());
         self.push(label, args, Purpose::Edit);
+    }
+
+    fn add_scanned_sources(&mut self, sources: Vec<Source>, ctx: &egui::Context) {
+        for mut source in sources {
+            let existing = self.sources.iter().position(|s| s.path == source.path);
+            let mut previous_defaults = None;
+            if let Some(index) = existing {
+                let previous = &self.sources[index];
+                if previous.tree_roots.is_empty()
+                    || previous.tree_roots == source.tree_roots
+                {
+                    continue;
+                }
+                if previous.supported && source.supported {
+                    source.selected = previous.selected;
+                }
+                let key = text(&source.path);
+                if self.appearances.contains_key(&key) {
+                    previous_defaults =
+                        self.games().into_iter().find(|game| game.key == key);
+                }
+                self.textures.remove(&source.path);
+            }
+            if let Some(bytes) = source.icon.take() {
+                if let Ok(mut art) = artwork::Artwork::decode(&bytes) {
+                    self.textures
+                        .insert(source.path.clone(), art.texture(ctx).clone());
+                }
+                source.icon = Some(bytes);
+            }
+            if let Some(index) = existing {
+                self.sources[index] = source;
+            } else {
+                self.sources.push(source);
+            }
+            if let Some(previous) = previous_defaults {
+                if let Some(updated) = self
+                    .games()
+                    .into_iter()
+                    .find(|game| game.key == previous.key)
+                {
+                    if let Some(draft) = self.appearances.get_mut(&previous.key) {
+                        if draft.title == previous.default_title {
+                            draft.title = updated.default_title;
+                        }
+                        if draft.publisher == previous.publisher {
+                            draft.publisher = updated.publisher;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---- command results ----
@@ -1032,23 +1174,10 @@ impl App {
             return;
         };
         let mut finished = None;
+        let mut scanned = Vec::new();
         while let Ok(message) = running.rx.try_recv() {
             match message {
-                Message::Sources(sources) => {
-                    for mut source in sources {
-                        if self.sources.iter().any(|s| s.path == source.path) {
-                            continue;
-                        }
-                        if let Some(bytes) = source.icon.take() {
-                            if let Ok(mut art) = artwork::Artwork::decode(&bytes) {
-                                self.textures
-                                    .insert(source.path.clone(), art.texture(ctx).clone());
-                            }
-                            source.icon = Some(bytes);
-                        }
-                        self.sources.push(source);
-                    }
-                }
+                Message::Sources(sources) => scanned.extend(sources),
                 Message::Metadata(mut metadata) => {
                     self.archive_cover = metadata
                         .as_ref()
@@ -1083,6 +1212,7 @@ impl App {
                 Message::Done(result) => finished = Some(result),
             }
         }
+        self.add_scanned_sources(scanned, ctx);
         if let Some(result) = finished {
             let running = self.running.take().unwrap();
             // A successful command has already committed. A late cancel click
