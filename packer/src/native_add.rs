@@ -1426,38 +1426,7 @@ pub fn extract_exefs(
     let result = (|| {
         let root = &archive.directories[snapshot.snapshot.root as usize];
         if let Some(exefs) = root.iter().find(|e| e.kind == 1 && e.name == "exefs") {
-            let mut nodes = Vec::new();
-            let mut total = 0;
-            visit_identity_tree(
-                exefs.target,
-                &[],
-                0,
-                &archive,
-                &mut HashSet::new(),
-                &mut nodes,
-                &mut total,
-            )?;
-            options.progress.add_total(total);
-            for node in nodes {
-                cancelled(options)?;
-                let path =
-                    std::str::from_utf8(&node.path).map_err(|_| bad("non-UTF8 ExeFS path"))?;
-                crate::import::portable_path(path, &crate::import::ImportLimits::default())?;
-                let target = crate::import::join(destination, path);
-                if let Some(index) = node.source_file {
-                    let record = &archive.files[index as usize];
-                    let mut reader = snapshot_file_reader(&mut file, &archive, index, options)?;
-                    export_exefs_file(
-                        &mut reader,
-                        &target,
-                        record.size,
-                        Some(record.digest),
-                        options,
-                    )?;
-                } else {
-                    std::fs::create_dir(target)?;
-                }
-            }
+            export_tree(&mut file, &archive, exefs.target, destination, options)?;
         } else {
             let (index, entries) =
                 native_exefs(path, &mut file, &archive, snapshot, &budget, options)?;
@@ -1484,6 +1453,89 @@ pub fn extract_exefs(
         let _ = std::fs::remove_dir_all(destination);
     }
     result
+}
+
+/// Export a stored tree snapshot (converted from a NUP or a dump folder) as
+/// plain files: the whole snapshot root, usually exefs/ and romfs/.
+pub fn extract_tree(
+    path: impl AsRef<Path>,
+    identity: [u8; 32],
+    destination: impl AsRef<Path>,
+    options: &WriterOptions,
+) -> Result<(), WriterError> {
+    validate_options(options)?;
+    cancelled(options)?;
+    let destination = destination.as_ref();
+    let mut file = File::open(path.as_ref())?;
+    let mut budget = MemoryBudget {
+        current: 0,
+        peak: 0,
+        limit: options.max_memory_bytes,
+    };
+    let archive = parse_archive(&mut file, 0, options, &mut budget)?;
+    let snapshot = archive
+        .snapshots
+        .iter()
+        .find(|s| s.snapshot.identity == identity)
+        .ok_or_else(|| invalid("snapshot identity is absent"))?;
+    // A tree DLC keeps its add-on title ID where native content keeps a content ID.
+    if !snapshot.snapshot.addon && snapshot.snapshot.content_id != [0; 16] {
+        return Err(invalid("the snapshot stores NCA files, not a file tree"));
+    }
+    std::fs::create_dir(destination)?;
+    let result = export_tree(
+        &mut file,
+        &archive,
+        snapshot.snapshot.root,
+        destination,
+        options,
+    )
+    .and_then(|()| cancelled(options));
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(destination);
+    }
+    result
+}
+
+fn export_tree(
+    file: &mut File,
+    archive: &SourceArchive,
+    dir_id: u32,
+    destination: &Path,
+    options: &WriterOptions,
+) -> Result<(), WriterError> {
+    let mut nodes = Vec::new();
+    let mut total = 0;
+    visit_identity_tree(
+        dir_id,
+        &[],
+        0,
+        archive,
+        &mut HashSet::new(),
+        &mut nodes,
+        &mut total,
+    )?;
+    options.progress.add_total(total);
+    for node in nodes {
+        cancelled(options)?;
+        let path = std::str::from_utf8(&node.path).map_err(|_| bad("non-UTF8 file path"))?;
+        crate::import::portable_path(path, &crate::import::ImportLimits::default())?;
+        let target = crate::import::join(destination, path);
+        if let Some(index) = node.source_file {
+            let record = &archive.files[index as usize];
+            let mut reader = snapshot_file_reader(file, archive, index, options)?;
+            export_exefs_file(
+                &mut reader,
+                &target,
+                record.size,
+                Some(record.digest),
+                options,
+            )?;
+        } else {
+            std::fs::create_dir(target)?;
+        }
+    }
+    Ok(())
 }
 
 fn native_exefs(
@@ -1563,7 +1615,7 @@ fn export_exefs_file(
     while remaining != 0 {
         let n = reader.read_native(&mut buffer[..remaining.min(128 * 1024) as usize])?;
         if n == 0 {
-            return Err(bad("ExeFS file is truncated"));
+            return Err(bad("snapshot file is truncated"));
         }
         output.write_all(&buffer[..n])?;
         if digest.is_some() {
@@ -1573,7 +1625,7 @@ fn export_exefs_file(
         options.progress.add_done(n as u64);
     }
     if digest.is_some_and(|expected| expected != hash.finish()) {
-        return Err(bad("ExeFS file SHA-256 mismatch"));
+        return Err(bad("snapshot file SHA-256 mismatch"));
     }
     Ok(())
 }

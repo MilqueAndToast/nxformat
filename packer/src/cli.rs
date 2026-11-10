@@ -120,7 +120,8 @@ nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...] (rebuild the original files i
 nxconvert check-recipe ARCHIVE.nx (replay every recipe kept in the NX)\n\
 nxconvert scan SOURCE|FOLDER... (decrypted packages; @SOURCE, @CONTENT and @ISSUE lines)\n\
 nxconvert contents ARCHIVE.nx (@APP, @SNAPSHOT, @RESOURCE, @RECIPE, @RECLAIMABLE and @ALLOCATED lines)\n\
-nxconvert extract-exefs ARCHIVE.nx [SNAPSHOT_IDENTITY] NEW_FOLDER (one snapshot, or every base and update as base/exefs and updates/<version>/exefs)\n\
+nxconvert extract-exefs ARCHIVE.nx SNAPSHOT_IDENTITY NEW_FOLDER\n\
+nxconvert extract ARCHIVE.nx NEW_FOLDER (every snapshot as a dump: base, updates/<version>, dlc/<title>/<version>)\n\
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]] (add updates and DLC in place, with rebuild recipes by default)\n\
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N] (add extracted trees in place: updates/<version>/ and dlc/ folders, or with --update-version one update folder holding exefs/ and romfs/)\n\
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY... (remove in place)\n\
@@ -1087,19 +1088,23 @@ fn dlc_title(path: &Path, s: &SnapshotSummary, options: &WriterOptions) -> u64 {
         })
         .unwrap_or(0)
 }
-/// Export the ExeFS of every base and update in the layout `pack-tree` reads:
-/// `base/exefs` and `updates/<version>/exefs`, under one folder per
-/// application when the archive holds several. Programs that would share a
-/// folder (multi-program games) get their Program ID appended. Returns the
-/// number of ExeFS written; `destination` must not exist and is removed on error.
-fn extract_all_exefs(
+/// Export every snapshot in the dump layout `pack-tree` reads: `base`,
+/// `updates/<version>` and `dlc/<title id>/<version>`, under one folder per
+/// application when the archive holds several. A file tree (from a NUP or a
+/// dump folder) is written whole, usually exefs/ and romfs/. Snapshots kept as
+/// NCA files only give their ExeFS, and native DLC is skipped: reading their
+/// RomFS would need NCA and patch decoding. Programs that would share a folder
+/// get their Program ID appended. `destination` must not exist and is removed
+/// on error. Returns the number of snapshots written and the partial ones.
+fn extract_all(
     path: &Path,
     destination: &Path,
     options: &WriterOptions,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<(usize, Vec<String>), Box<dyn std::error::Error>> {
     let summary = inspect_archive(path, options, IntegrityPolicy::Fast)?;
     let several = summary.applications.len() > 1;
-    let mut jobs: Vec<(String, Option<u64>, [u8; 32])> = Vec::new();
+    let mut jobs: Vec<(String, Option<u64>, [u8; 32], bool)> = Vec::new();
+    let mut partial = Vec::new();
     for a in &summary.applications {
         let prefix = if several {
             format!("{:016x}/", a.application_id)
@@ -1107,45 +1112,56 @@ fn extract_all_exefs(
             String::new()
         };
         for s in &a.snapshots {
+            let tree = s.content_id.is_none();
             let folder = match s.snapshot_type {
                 SnapshotType::Base => "base".to_owned(),
                 SnapshotType::Update | SnapshotType::StandaloneUpdate => {
                     format!("updates/{}", s.numeric_version)
                 }
+                SnapshotType::Dlc => format!(
+                    "dlc/{:016x}/{}",
+                    dlc_title(path, s, options),
+                    s.numeric_version
+                ),
                 _ => continue,
             };
-            // A stored tree without an exefs folder has nothing to export.
-            if s.content_id.is_none() {
-                let files =
-                    inspect_snapshot_files(path, s.identity, options, IntegrityPolicy::Fast)?;
-                if !files.iter().any(|f| f.path.starts_with("exefs/")) {
+            let folder = format!("{prefix}{folder}");
+            if !tree {
+                if s.snapshot_type == SnapshotType::Dlc {
+                    partial.push(format!("{folder} skipped (stored as NCA files)"));
                     continue;
                 }
+                partial.push(format!("{folder} ExeFS only (stored as NCA files)"));
             }
-            jobs.push((format!("{prefix}{folder}"), s.program_id, s.identity));
+            jobs.push((folder, s.program_id, s.identity, tree));
         }
     }
     if jobs.is_empty() {
-        return Err("the archive has no base or update with an ExeFS".into());
+        return Err("the archive has no snapshot that can be extracted".into());
     }
     fs::create_dir(destination)?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        for (folder, program_id, identity) in &jobs {
+        for (folder, program_id, identity, tree) in &jobs {
             let shared = jobs.iter().filter(|(other, ..)| other == folder).count() > 1;
             let folder = match (shared, program_id) {
                 (true, Some(id)) => format!("{folder}-{id:016x}"),
                 _ => folder.clone(),
             };
             let target = destination.join(&folder);
-            fs::create_dir_all(&target)?;
-            extract_exefs(path, *identity, target.join("exefs"), options)?;
+            if *tree {
+                fs::create_dir_all(target.parent().unwrap_or(destination))?;
+                extract_tree(path, *identity, &target, options)?;
+            } else {
+                fs::create_dir_all(&target)?;
+                extract_exefs(path, *identity, target.join("exefs"), options)?;
+            }
         }
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(destination);
     }
-    result.map(|()| jobs.len())
+    result.map(|()| (jobs.len(), partial))
 }
 /// Machine-readable contents of an NX archive.
 fn print_contents(path: &Path, options: &WriterOptions) -> Result<(), Box<dyn std::error::Error>> {
@@ -1608,11 +1624,14 @@ fn native_commands(args: &[String], o: &Options) -> Result<(), Box<dyn std::erro
             drop(watch);
             println!("Extracted ExeFS to {}", args[3]);
         }
-        ("extract-exefs", 3) => {
+        ("extract", 3) => {
             let watch = ProgressWatch::counter(o.frontend, &options.progress);
-            let count = extract_all_exefs(Path::new(&args[1]), Path::new(&args[2]), &options)?;
+            let (count, partial) = extract_all(Path::new(&args[1]), Path::new(&args[2]), &options)?;
             drop(watch);
-            println!("Extracted {count} ExeFS to {}", args[2]);
+            for note in &partial {
+                println!("Note: {note}");
+            }
+            println!("Extracted {count} snapshots to {}", args[2]);
         }
         ("add", n) if n >= 3 => {
             let archive = Path::new(&args[1]);
@@ -1917,6 +1936,7 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 | "scan"
                 | "contents"
                 | "extract-exefs"
+                | "extract"
                 | "add"
                 | "remove"
                 | "compact"

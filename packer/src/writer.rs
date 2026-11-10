@@ -4948,7 +4948,7 @@ fn plan_inputs(
 mod repack;
 pub use repack::{
     add_native_content, add_native_contents, compact_archive, edit_archive_metadata,
-    edit_archive_recipes, extract_exefs, inspect_archive, inspect_snapshot_files,
+    edit_archive_recipes, extract_exefs, extract_tree, inspect_archive, inspect_snapshot_files,
     inspect_source_resources, read_original_icon, read_snapshot_display, read_snapshot_file_range,
     read_snapshot_nacp, repack_archive, ApplicationSummary, ArchiveSummary, IntegrityPolicy,
     MetadataEdit, MetadataSourceSelection, NativeAddRequest, NativeAddStats, ProgramSummary,

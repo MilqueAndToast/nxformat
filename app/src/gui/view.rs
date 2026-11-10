@@ -675,14 +675,13 @@ impl App {
                     vec!["compact".into(), path.clone()],
                 ));
             }
-            if archive.snapshots.iter().any(|s| s.kind != "dlc")
-                && ui
-                    .button("Extract all ExeFS…")
-                    .on_hover_text(
-                        "Export the ExeFS of the game and every update: base/exefs and \
-                         updates/<version>/exefs, the layout of a dump.",
-                    )
-                    .clicked()
+            if ui
+                .button("Extract all…")
+                .on_hover_text(
+                    "Export every snapshot in the layout of a dump: base, updates/<version> \
+                     and dlc/<title>/<version>. Content kept as NCA files only gives its ExeFS.",
+                )
+                .clicked()
             {
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                     let stem = archive
@@ -691,12 +690,8 @@ impl App {
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "archive".into());
                     action = Some((
-                        "Extracting ExeFS".into(),
-                        vec![
-                            "extract-exefs".into(),
-                            path.clone(),
-                            text(&folder.join(format!("{stem}-exefs"))),
-                        ],
+                        "Extracting archive".into(),
+                        vec!["extract".into(), path.clone(), text(&folder.join(stem))],
                     ));
                 }
             }
@@ -816,7 +811,10 @@ impl App {
         if let Some((label, mut args)) = action {
             if label == "open" {
                 self.choose_archive();
-            } else if args.first().is_some_and(|cmd| cmd == "extract-exefs") {
+            } else if args
+                .first()
+                .is_some_and(|cmd| cmd == "extract-exefs" || cmd == "extract")
+            {
                 args.push("--frontend".into());
                 self.push(label, args, Purpose::Export);
             } else {
