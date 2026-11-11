@@ -1,3 +1,16 @@
+## Local decryption fork — support status
+
+[Download Preview 2 for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.2-local-decryption.2). Requires your own matching keys.
+
+| Feature | Status |
+|---|---|
+| Switch NCA3 NSP/XCI decryption, base/update/DLC | Tested with real dumps; CTR and CTR-EX supported |
+| Sparse NCA3 and skip-hash modes | Implemented; synthetic tests only. Sparse base/update conversion and strict NX verification pass; real sparse games remain untested |
+| Encrypted Switch 2, NCA0/NCA2, XTS content sections, NCZ/NSZ/XCZ | Unsupported |
+| Emulator gameplay; this fork on Linux/macOS | Untested |
+
+Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Missing content still requires its matching update. Originals stay intact; optional rebuild recipes recreate decrypted bytes. See [usage and key requirements](LOCAL-DECRYPTION.md) and [test details](TESTING.md). The upstream documentation below also covers already-decrypted Switch 2 input.
+
 <p align="center">
   <img src="docs/nxformat.png" alt="NXFormat" width="900">
 </p>
