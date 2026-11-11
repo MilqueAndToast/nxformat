@@ -114,7 +114,8 @@ nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2] [--tree-root 
 nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc]\n\
 nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
-nxconvert pack SOURCE... OUTPUT.nx [--no-recipe [--omit-firmware]] (decrypted DNSP/DXCI; keeps exact rebuild recipes by default)\n\
+nxconvert pack SOURCE... OUTPUT.nx [--keys prod.keys] [--title-keys title.keys] [--no-recipe [--omit-firmware]]\n\
+--keys enables streaming NSP/XCI decryption; adjacent title.keys is loaded automatically. Recipes default OFF with keys; --recipe rebuilds decrypted bytes, not encrypted originals.\n\
 nxconvert recipe ARCHIVE.nx SOURCE|RECIPE.nxrecipe... (keep rebuild recipes inside the NX)\n\
 nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...] (rebuild the original files into FOLDER)\n\
 nxconvert check-recipe ARCHIVE.nx (replay every recipe kept in the NX)\n\
@@ -138,6 +139,8 @@ Without explicit budgets, pack-tree and source verify size the inventory from th
 }
 #[derive(Default)]
 struct Options {
+    keys: Option<PathBuf>,
+    title_keys: Option<PathBuf>,
     fallback_title: Option<String>,
     fallback_icon: Option<PathBuf>,
     latest: bool,
@@ -215,6 +218,8 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
                 .ok_or("budget overflow")?)
         };
         match a.as_str() {
+            "--keys" => o.keys = Some(PathBuf::from(&value)),
+            "--title-keys" => o.title_keys = Some(PathBuf::from(&value)),
             "--fallback-title" => o.fallback_title = Some(value.clone()),
             "--fallback-icon" => o.fallback_icon = Some(PathBuf::from(&value)),
             "--dlc" => {
@@ -1903,7 +1908,21 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         println!("nxconvert {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    let (mut args, o) = parse(argv)?;
+    let (mut args, mut o) = parse(argv)?;
+    if let Some(path) = &o.keys {
+        crate::decrypt::load_keys(path, o.title_keys.as_deref())?;
+    } else if o.title_keys.is_some() {
+        return Err("--title-keys requires --keys prod.keys".into());
+    }
+    if crate::decrypt::keys_loaded() {
+        // Recipes rebuild the logical decrypted source, not the encrypted original.
+        if o.recipe.is_none() && matches!(args.first().map(String::as_str), Some("pack" | "add")) {
+            o.recipe = Some(false);
+        }
+        if o.recipe == Some(true) {
+            eprintln!("NOTE: local-key decryption is enabled; recipes reconstruct the decrypted source view, not the encrypted original.");
+        }
+    }
     if !o.tree_roots.is_empty() && (args.len() != 3 || args[0] != "pack-tree") {
         return Err("--tree-root applies to automatic pack-tree only".into());
     }

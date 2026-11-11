@@ -31,12 +31,12 @@
 - ✏️ **Updates and DLC, in place.** Add or remove content without copying the base game during normal edits.
 - 🧩 **Store shared content once.** Reuse identical blocks across game files, updates and DLC.
 - 🎮 **Switch 1 and Switch 2.** Convert supported decrypted **DNSP/DXCI** packages, extracted folders and NUP archives.
-- 📦 **Get your original files back.** Native package conversions try to keep a recipe to recreate the original bytes (on by default, `--no-recipe` to skip it). Rebuilding needs all referenced content. [Learn more](docs/RECIPE.md).
+- 📦 **Rebuild source packages.** Without local decryption, native package conversions keep original-byte recipes by default. With local decryption, recipes default off and explicit recipes rebuild decrypted bytes. Rebuilding needs all referenced content. [Learn more](LOCAL-DECRYPTION.md).
 - 🛡️ **Spot damaged game files.** Built-in integrity checks detect corruption during reads or a full archive check.
 - 🛠️ **Emulator ready.** C++17 reader, Rust library and C API for Windows, Linux, macOS and Android (libraries). [Integration](#developer-integration).
 
 > **Legal note**
-> <sub>**NXConvert does not decrypt anything.** It only repackages game files you have already decrypted yourself, from games you own. It contains no keys and no copyrighted content.</sub>
+> **Local Decryption fork:** this fork adds streaming decryption for supported encrypted Switch NSP/XCI inputs using your own local `prod.keys` and optional `title.keys`. It includes no keys or game content. See [LOCAL-DECRYPTION.md](LOCAL-DECRYPTION.md) for usage, support limits, and recipe semantics. Upstream behavior and documentation below otherwise remain applicable.
 
 ## Quick start
 

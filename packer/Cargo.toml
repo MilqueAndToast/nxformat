@@ -15,6 +15,8 @@ default = ["accelerated-sha"]
 accelerated-sha = ["dep:sha2"]
 
 [dependencies]
+aes = { version = "=0.8.4", features = ["zeroize"] }
+zeroize = "=1.8.2"
 same-file = "=1.0.6"
 sha2 = { version = "=0.10.9", optional = true }
 zstd = { version = "=0.14.3", default-features = false, features = ["experimental"] }

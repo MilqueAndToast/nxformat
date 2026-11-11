@@ -24,7 +24,7 @@ pub fn run() -> eframe::Result<()> {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("NXConvert")
+            .with_title("NXConvert — Local Decryption")
             .with_icon(Arc::new(icon))
             // The configuration column keeps its width: the window never gets
             // narrow enough for the sources to run under it.
@@ -656,6 +656,7 @@ struct Appearance {
 type EncodedArtwork = Result<(Vec<u8>, egui::ColorImage), String>;
 
 struct App {
+    keys_path: Option<PathBuf>,
     appearances: HashMap<String, Appearance>,
     textures: HashMap<PathBuf, egui::TextureHandle>,
     archive_cover: Option<egui::TextureHandle>,
@@ -683,6 +684,7 @@ struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            keys_path: None,
             appearances: HashMap::new(),
             textures: HashMap::new(),
             archive_cover: None,
@@ -1019,6 +1021,8 @@ impl App {
                 let omit_firmware = self.omits_firmware(&game);
                 if !self.recipe || omit_firmware {
                     args.push("--no-recipe".into());
+                } else {
+                    args.push("--recipe".into());
                 }
                 if omit_firmware {
                     args.push("--omit-firmware".into());

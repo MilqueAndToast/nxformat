@@ -33,3 +33,4 @@ pub use writer::{
 
 pub mod cli;
 pub mod conversion;
+pub mod decrypt;

@@ -2,8 +2,8 @@
 //!
 //! An emulator that can decrypt games registers a source with a size and a
 //! positioned read; nxformat gets a path for it (`nxsource://<id>/<name>`)
-//! that every command accepts where it accepts a file. nxformat never sees
-//! keys: it only reads the plaintext bytes the caller returns.
+//! that every command accepts where it accepts a file. Caller sources supply
+//! plaintext. This fork can also open local NSP/XCI files through `decrypt`.
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -110,8 +110,23 @@ pub(crate) fn open(path: &Path) -> io::Result<SourceFile> {
             source,
             position: 0,
         }),
-        None => File::open(path).map(SourceFile::Disk),
+        None => match crate::decrypt::open(path)? {
+            Some((size, reader)) => Ok(SourceFile::Virtual {
+                source: Arc::new(Registered {
+                    size,
+                    reader: Mutex::new(Box::new(reader)),
+                }),
+                position: 0,
+            }),
+            None => File::open(path).map(SourceFile::Disk),
+        },
     }
+}
+
+/// Open the same logical source view used by inventory and conversion.
+/// In particular, artwork reads must also pass through local-key decryption.
+pub fn reader(path: &Path) -> io::Result<impl Read + Seek> {
+    open(path)
 }
 
 impl Read for SourceFile {

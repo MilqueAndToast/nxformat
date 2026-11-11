@@ -100,7 +100,7 @@ impl App {
                         RichText::new(if archive {
                             "Drop an NX archive here"
                         } else {
-                            "Drop an NX, a NUP, a folder or decrypted files"
+                            "Drop an NX, a NUP, a folder, NSP or XCI files"
                         })
                         .size(19.0)
                         .strong(),
@@ -108,7 +108,7 @@ impl App {
                     ui.label(theme::muted(if archive {
                         ".nx"
                     } else {
-                        "NX archives · NUP · Extracted folders · DNSP · DXCI"
+                        "NX archives · NUP · Extracted folders · NSP · XCI · DNSP · DXCI"
                     }));
                     ui.add_space(14.0);
                     if archive {
@@ -445,8 +445,9 @@ impl App {
                     .on_hover_text("Allow bundled firmware for all games. Choose which games include it in Sources.");
             }
             if has_packages {
-                ui.checkbox(&mut self.recipe, "Keep original rebuild data")
-                    .on_hover_text("Keep a recipe to rebuild native package files byte for byte.");
+                let recipe_label = if self.keys_path.is_some() { "Keep decrypted rebuild data" } else { "Keep original rebuild data" };
+                ui.checkbox(&mut self.recipe, recipe_label)
+                    .on_hover_text("Rebuilds the source view byte for byte. With decryption enabled, this means decrypted packages, not encrypted originals.");
                 if self.recipe && games.iter().any(|game| self.omits_firmware(game)) {
                     ui.label(theme::muted("Rebuild data is skipped for games whose firmware is omitted.").small());
                 }
@@ -648,13 +649,15 @@ impl App {
         ui.horizontal_wrapped(|ui| {
             if theme::button(ui, Icon::Plus, "Add update / DLC", false).clicked() {
                 if let Some(files) = rfd::FileDialog::new()
-                    .add_filter("Decrypted games", &["dnsp", "dxci", "nsp", "xci"])
+                    .add_filter("Game packages", &["dnsp", "dxci", "nsp", "xci"])
                     .pick_files()
                 {
                     let mut args = vec!["add".into(), path.clone()];
                     args.extend(files.iter().map(|p| text(p)));
                     if !self.recipe {
                         args.push("--no-recipe".into());
+                    } else {
+                        args.push("--recipe".into());
                     }
                     action = Some(("Adding content".into(), args));
                 }
@@ -960,6 +963,35 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG).inner_margin(24))
             .show(ui, |ui| {
+                ui.add_enabled_ui(!busy && !artwork_pending, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Load keys…").on_hover_text("Choose your prod.keys; title.keys beside it is loaded automatically. Keys stay local.").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().set_title("Select prod.keys").add_filter("Keys", &["keys"]).pick_file() {
+                                match nxformat_packer::decrypt::load_keys(&path, None) {
+                                    Ok(()) => {
+                                        self.keys_path = Some(path);
+                                        self.recipe = false;
+                                        self.status = "Keys loaded. Encrypted NSP/XCI files can now be added.".into();
+                                        let paths = self.sources.iter().map(|s| s.path.clone()).collect();
+                                        self.sources.clear();
+                                        self.textures.clear();
+                                        self.scan(paths);
+                                    }
+                                    Err(error) => self.status = format!("Cannot load keys: {error}"),
+                                }
+                            }
+                        }
+                        if let Some(path) = &self.keys_path {
+                            ui.label(format!("Keys: {}", path.display()));
+                        } else {
+                            ui.label("Encrypted NSP/XCI: load your local prod.keys first.");
+                        }
+                    });
+                });
+                if self.keys_path.is_some() && self.recipe {
+                    ui.label("Recipes rebuild decrypted packages; keep your encrypted originals separately.");
+                }
+                ui.separator();
                 ui.add_enabled_ui(!artwork_pending, |ui| {
                     if busy {
                         self.progress_view(ui);

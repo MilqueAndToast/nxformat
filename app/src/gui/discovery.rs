@@ -359,7 +359,8 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
                             .or_else(|| control.icon_ranges.first());
                         if let Some((_, offset, size, _)) = range {
                             if *size <= 16 * 1024 * 1024 {
-                                if let Ok(mut file) = File::open(&s.path) {
+                                if let Ok(mut file) = nxformat_packer::source_file::reader(&s.path)
+                                {
                                     if file.seek(SeekFrom::Start(*offset)).is_ok() {
                                         let mut bytes = vec![0; *size as usize];
                                         if file.read_exact(&mut bytes).is_ok() {
