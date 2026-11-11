@@ -33,8 +33,11 @@ Recipes are off by default when keys are loaded. **Keep decrypted rebuild data**
 - Common tickets, recovered `title.keys`, and rights-free key-area keys.
 - Direct derived keys or derivation from matching master keys and standard key sources.
 - PFS0 NSP and HFS0 XCI. Console firmware in an XCI's `update` partition remains opaque (or use `--omit-firmware`).
+- Sparse NCA3 sections: encrypted mapping tables, mapped content, and zero-filled holes; NSP/HFS0 entry offsets and sizes adjust to the logical decrypted size.
 
-Unsupported layouts fail explicitly: sparse NCAs, NCA0/NCA2, AES-XTS content sections, NCZ/NSZ/XCZ. Switch 2 encrypted input is not claimed; upstream support for already decrypted sources remains available. Loading a key file does not guarantee its keys match a particular game. Cryptographic signatures are not verified; NXConvert's normal filesystem and NX integrity checks still apply.
+Sparse support is bounded to 1,000,000 mappings and 64 MiB of table data per section (a single index-node level). Larger or malformed tables fail explicitly. Mapped content streams from the original file; holes are generated on demand. A sparse base can intentionally lack its executable or other data: add the matching update. This does not recover data absent from both inputs. Sparse decryption is tested with synthetic fixtures, including conversion to NX and strict verification; no real sparse game dump was available for validation.
+
+Unsupported layouts fail explicitly: NCA0/NCA2, AES-XTS content sections, NCZ/NSZ/XCZ. Switch 2 encrypted input is not claimed; upstream support for already decrypted sources remains available. Loading a key file does not guarantee its keys match a particular game. Cryptographic signatures are not verified; NXConvert's normal filesystem and NX integrity checks still apply.
 
 ## Build
 
@@ -48,7 +51,7 @@ cargo +1.95.0 test --locked --manifest-path packer/Cargo.toml --lib
 
 Executable: `app/target/release/nxconvert.exe`. A lightweight CLI-only test build is available with `cargo +1.95.0 build --locked --release --manifest-path packer/Cargo.toml --example nxconvert-cli`.
 
-Alternatively, `./build-windows.ps1 -Test` runs the tests and creates the executable folder and ZIP in `dist-release/`. Omit `-Test` to build/package only. The source ZIP is a separate archive of the Git commit; it excludes build products, private test fixtures, keys, and games.
+Alternatively, `./build-windows.ps1 -Test` runs the tests and creates the executable folder and ZIP in `dist-release/`. Omit `-Test` to build/package only. The script uses `app/target/public-release/` and remaps compiler source paths so the Windows executable contains no developer account/workspace paths. The source ZIP is a separate archive of the Git commit; it excludes build products, private test fixtures, keys, and games.
 
 The Rust AES implementation is from RustCrypto (`aes` crate). Keys are kept in process memory; file text and key-map allocations use `zeroize`. No crash-dump or OS memory protection guarantees are made.
 

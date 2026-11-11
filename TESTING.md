@@ -4,7 +4,7 @@ Validated on Windows x64 with Rust 1.95.0, using the owner's existing local key 
 
 | Check | Result |
 |---|---|
-| Packer regression suite | 92 tests passed; the Windows junction fixture test required execution outside the restricted sandbox |
+| Packer regression suite | 99 tests passed across the suite and added focused test; the Windows junction fixture test required execution outside the restricted sandbox |
 | GUI regression suite | 9 tests passed |
 | Discovery of the local NSP/XCI library | All 59 packages recognized individually |
 | Wargroove NSP base + update + DLC | Converted together with paranoid source comparison; strict NX verification passed; all three snapshots present |
@@ -20,6 +20,9 @@ Validated on Windows x64 with Rust 1.95.0, using the owner's existing local key 
 | GUI two-game queue and cancellation | Both XCIs grouped with artwork; active job and one queued job shown; elapsed time and spinner continued; cancel returned to the source list and published no output or leftover staging file |
 | Cryptography regression tests | NIST AES vector and independent OpenSSL XTS/unaligned CTR vectors passed |
 | Patch-reader regression tests | Legacy/new table boundaries, plaintext regions, odd read boundaries, and malformed coverage passed |
+| Sparse reader fixtures (synthetic) | Mapped/plain/CTR/CTR-EX/skip-hash content; logical counters; holes; empty and multiple entry sets; patch metadata; growth/shrinkage in NSP and nested HFS0; 15 malformed cases and out-of-bounds reads passed |
+| Sparse conversion (synthetic) | A sparse base with an absent executable and an encrypted mapping table for its second section, plus its matching update, converted with paranoid source comparison; strict NX verification and both embedded recipes passed |
+| Sparse release regressions (real, non-sparse sources) | The same 59-package scan and Wargroove, Mystery Dungeon, and Legends Z-A conversions were repeated after introducing the mapped source reader |
 
 Representative conversion results (level 1, two workers; hardware/cache-dependent):
 
@@ -29,6 +32,6 @@ Representative conversion results (level 1, two workers; hardware/cache-dependen
 
 The tests verify archive structure, integrity, metadata, and reconstruction. Gameplay/emulator boot testing was not performed. Recognized sources are not a promise that every combination can be converted: the full library scan also reported two conflicting Sword DLC duplicates (standalone versus included in the XCI), plus Scarlet and Tears of the Kingdom updates with no matching base in this library. Select one copy of each conflicting DLC and supply missing bases as appropriate.
 
-Not claimed/tested as supported: encrypted Switch 2 content, sparse NCAs, NCA0/NCA2, AES-XTS content sections, NCZ/NSZ/XCZ. Skip-layer-hash support follows the format but has not been separately isolated as an end-to-end fixture. Nintendo signatures are not verified. Rebuild recipes refer to the decrypted view and retain package extras such as ticket/certificate records; they do not restore the original encrypted bytes.
+Not claimed/tested as supported: encrypted Switch 2 content, NCA0/NCA2, AES-XTS content sections, NCZ/NSZ/XCZ, sparse trees beyond the documented limits. Sparse validation uses generated fixtures only; no real sparse game dump was available. Skip-layer-hash modes have isolated synthetic reader coverage, but no separate real-game end-to-end fixture. Nintendo signatures are not verified. Rebuild recipes refer to the decrypted view (including resized sparse sections) and retain package extras such as ticket/certificate records; they do not restore the original encrypted bytes.
 
 No full decrypted intermediate is created by conversion: the production source adapter opens files read-only, holds bounded header/table data, and applies AES to requested read ranges. Rebuilt NSPs used in recipe tests were created only by the explicitly invoked rebuild command.

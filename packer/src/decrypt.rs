@@ -13,6 +13,10 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 use zeroize::Zeroizing;
+#[cfg(test)]
+mod sparse_tests;
+mod view;
+use view::{Content, View};
 
 fn bad(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
@@ -79,7 +83,9 @@ impl Keys {
                     || name.starts_with("master_key_")
                     || matches!(
                         name.as_str(),
-                        "aes_kek_generation_source" | "aes_key_generation_source"
+                        "aes_kek_generation_source"
+                            | "aes_key_generation_source"
+                            | "titlekek_source"
                     )
             };
             if !relevant {
@@ -214,6 +220,8 @@ struct Entry {
     start: u64,
     size: u64,
     name: String,
+    table: u64,
+    data: u64,
 }
 fn partition(file: &mut File, start: u64, size: u64, hfs: bool) -> io::Result<Vec<Entry>> {
     let end = range(start, size, file.metadata()?.len())?;
@@ -253,6 +261,8 @@ fn partition(file: &mut File, start: u64, size: u64, hfs: bool) -> io::Result<Ve
             start: at,
             size,
             name,
+            table: start + 16 + p as u64,
+            data,
         });
     }
     entries.sort_by_key(|e| e.start);
@@ -278,13 +288,19 @@ struct Span {
     transform: Transform,
 }
 pub(crate) struct Decrypted {
-    file: File,
+    file: Box<dyn SourceReader>,
     spans: Vec<Span>,
+    holes: Vec<(u64, u64)>,
+}
+impl SourceReader for File {
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
+        self.seek(SeekFrom::Start(offset))?;
+        self.read_exact(buffer)
+    }
 }
 impl SourceReader for Decrypted {
     fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_exact(buffer)?;
+        self.file.read_at(offset, buffer)?;
         let end = offset
             .checked_add(buffer.len() as u64)
             .ok_or_else(|| bad("read overflow"))?;
@@ -304,6 +320,11 @@ impl SourceReader for Decrypted {
                     nca_start,
                 } => ctr(out, cipher, *upper, a - nca_start),
             }
+        }
+        // Sparse holes represent absent plaintext, not encrypted zero bytes.
+        let first = self.holes.partition_point(|(_, b)| *b <= offset);
+        for &(a, b) in self.holes[first..].iter().take_while(|(a, _)| *a < end) {
+            buffer[(a.max(offset) - offset) as usize..(b.min(end) - offset) as usize].fill(0);
         }
         Ok(())
     }
@@ -382,25 +403,96 @@ pub(crate) fn open(path: &Path) -> io::Result<Option<(u64, Decrypted)>> {
             }
         }
     }
+    if &head[..4] == b"PFS0" {
+        return package(&mut file, 0, size, false, false, &keys, &tickets).map(Some);
+    }
+    let root = u64le(&head, 0x130);
+    let (root_size, root_reader) =
+        package(&mut file, root, size - root, true, true, &keys, &tickets)?;
+    let raw = view::splice(
+        &file,
+        0,
+        size,
+        vec![(root, size - root, root_size, Box::new(root_reader))],
+    )?;
+    Ok(Some((
+        raw.size,
+        Decrypted {
+            file: Box::new(raw),
+            spans,
+            holes: Vec::new(),
+        },
+    )))
+}
+
+fn package(
+    file: &mut File,
+    start: u64,
+    size: u64,
+    hfs: bool,
+    root: bool,
+    keys: &Keys,
+    tickets: &HashMap<[u8; 16], [u8; 16]>,
+) -> io::Result<(u64, Decrypted)> {
+    let entries = partition(file, start, size, hfs)?;
+    let mut replacements = Vec::new();
+    let mut spans = Vec::new();
+    let mut shift: i128 = 0;
     for entry in entries {
-        if entry.name.ends_with(".ncz") {
-            return Err(bad(
-                "NCZ compression is unsupported; decompress the package first",
+        let child = if root && entry.name != "update" {
+            Some(package(
+                file,
+                entry.start,
+                entry.size,
+                true,
+                false,
+                keys,
+                tickets,
+            )?)
+        } else if !root && entry.name.ends_with(".nca") {
+            Some(
+                nca(file, &entry, keys, tickets)
+                    .map_err(|e| bad(format!("{}: {e}", entry.name)))?,
+            )
+        } else {
+            if !root && entry.name.ends_with(".ncz") {
+                return Err(bad(
+                    "NCZ compression is unsupported; decompress the package first",
+                ));
+            }
+            None
+        };
+        let new_size = child.as_ref().map(|c| c.0).unwrap_or(entry.size);
+        let relative = (entry.start - entry.data) as i128 + shift;
+        let relative =
+            u64::try_from(relative).map_err(|_| bad("resized partition offset overflow"))?;
+        let mut patch = relative.to_le_bytes().to_vec();
+        patch.extend(new_size.to_le_bytes());
+        spans.push(Span {
+            start: entry.table - start,
+            end: entry.table - start + 16,
+            transform: Transform::Replace(patch),
+        });
+        shift += new_size as i128 - entry.size as i128;
+        if let Some((_, reader)) = child {
+            replacements.push((
+                entry.start,
+                entry.size,
+                new_size,
+                Box::new(reader) as Box<dyn SourceReader>,
             ));
         }
-        if !entry.name.ends_with(".nca") {
-            continue;
-        }
-        add_nca(&mut file, &entry, &keys, &tickets, &mut spans)
-            .map_err(|e| bad(format!("{}: {e}", entry.name)))?;
     }
     spans.sort_by_key(|s| s.start);
-    for pair in spans.windows(2) {
-        if pair[0].end > pair[1].start {
-            return Err(bad("overlapping decryption ranges"));
-        }
-    }
-    Ok(Some((size, Decrypted { file, spans })))
+    let raw = view::splice(file, start, size, replacements)?;
+    Ok((
+        raw.size,
+        Decrypted {
+            file: Box::new(raw),
+            spans,
+            holes: Vec::new(),
+        },
+    ))
 }
 
 fn add_ctr(
@@ -423,19 +515,27 @@ fn add_ctr(
         });
     }
 }
-fn add_nca(
+fn nca(
     file: &mut File,
     entry: &Entry,
     keys: &Keys,
     tickets: &HashMap<[u8; 16], [u8; 16]>,
-    spans: &mut Vec<Span>,
-) -> io::Result<()> {
+) -> io::Result<(u64, Decrypted)> {
     if entry.size < 0xc00 {
         return Err(bad("NCA header truncated"));
     }
     let mut header = bytes(file, entry.start, 0xc00)?;
     if &header[0x200..0x204] == b"DNCA" {
-        return Ok(());
+        let mut raw = View::new(file)?;
+        raw.append(entry.size, Content::Disk(entry.start))?;
+        return Ok((
+            raw.size,
+            Decrypted {
+                file: Box::new(raw),
+                spans: Vec::new(),
+                holes: Vec::new(),
+            },
+        ));
     }
     if !matches!(&header[0x200..0x204], b"NCA3" | b"NCA2") {
         xts_decrypt(&mut header, keys.values.get("header_key").unwrap(), 0);
@@ -451,6 +551,12 @@ fn add_nca(
     let revision = header[0x206].max(header[0x220]).saturating_sub(1);
     let rights: [u8; 16] = header[0x230..0x240].try_into().unwrap();
     let mut ctr_key = None;
+    let mut spans = Vec::new();
+    let mut holes = Vec::new();
+    let mut raw = View::new(file)?;
+    raw.append(0xc00, Content::Disk(entry.start))?;
+    let mut sections = Vec::new();
+    let mut any_sparse = false;
     for i in 0..4 {
         let start = u32le(&header, 0x240 + i * 16) as u64 * 0x200;
         let end = u32le(&header, 0x244 + i * 16) as u64 * 0x200;
@@ -460,6 +566,24 @@ fn add_nca(
         if start < 0xc00 || end <= start {
             return Err(bad("invalid NCA section range"));
         }
+        any_sparse |= header[0x400 + i * 0x200 + 0x170..0x400 + i * 0x200 + 0x172] != [0, 0];
+        sections.push((start, end, i));
+    }
+    sections.sort_by_key(|s| s.0);
+    for (start, end, i) in sections {
+        if start < raw.size {
+            return Err(bad("overlapping NCA sections"));
+        }
+        let gap = start - raw.size;
+        let gap_at = entry.start + raw.size;
+        raw.append(
+            gap,
+            if any_sparse {
+                Content::Zero
+            } else {
+                Content::Disk(gap_at)
+            },
+        )?;
         let f = 0x400 + i * 0x200;
         let fs = &header[f..f + 0x200];
         if sha256(fs) != header[0x280 + i * 32..0x2a0 + i * 32] {
@@ -470,15 +594,19 @@ fn add_nca(
         if fs[0..2] != [2, 0] {
             return Err(bad("unsupported filesystem header version"));
         }
-        if fs[0x148..0x178].iter().any(|b| *b != 0) {
-            return Err(bad("sparse NCA is not supported by this decryption build"));
+        let sparse = fs[0x170..0x172] != [0, 0];
+        if !sparse && fs[0x148..0x178].iter().any(|b| *b != 0) {
+            return Err(bad("sparse information has no generation"));
         }
-        if end > entry.size {
+        if !sparse && end > entry.size {
             return Err(bad("NCA section extends beyond file"));
         }
         let enc = fs[4];
-        if enc != 1 {
-            if !matches!(enc, 3..=6) {
+        if !sparse {
+            raw.append(end - start, Content::Disk(entry.start + start))?;
+        }
+        if enc != 1 || sparse {
+            if !matches!(enc, 1 | 3..=6) {
                 return Err(bad(format!(
                     "unsupported NCA section encryption type {enc}"
                 )));
@@ -504,48 +632,190 @@ fn add_nca(
                 key
             };
             let upper = u64le(fs, 0x140).to_be_bytes();
+            if sparse {
+                let mapping = sparse_map(file, entry, fs, end - start, &key, upper)?;
+                for (a, b, physical) in mapping {
+                    raw.append(
+                        b - a,
+                        match physical {
+                            Some(at) => Content::Disk(at),
+                            None => {
+                                holes.push((start + a, start + b));
+                                Content::Zero
+                            }
+                        },
+                    )?;
+                }
+            }
             let skip = if enc >= 5 { hash_target(fs)? } else { 0 };
             if skip > end - start {
                 return Err(bad("hash-layer offset outside section"));
             }
             if enc == 3 || enc == 5 {
-                add_ctr(
-                    spans,
-                    entry.start + start + skip,
-                    entry.start + end,
-                    entry.start,
-                    &key,
-                    upper,
-                );
-            } else {
+                add_ctr(&mut spans, start + skip, end, 0, &key, upper);
+            } else if enc != 1 {
                 extended(
-                    file,
-                    entry.start,
+                    &mut raw,
+                    0,
                     start,
                     end - start,
                     fs,
                     &key,
                     upper,
                     skip,
-                    spans,
+                    &mut spans,
                 )?;
             }
         }
         header[f + 4] = 1;
+        if sparse {
+            header[f + 0x148..f + 0x178].fill(0);
+            if header[f + 5] != 0 && u64le(&header, f + 0x108) == 0 {
+                header[f + 5] = 0;
+                header[f + 0x1a0..f + 0x1d0].fill(0);
+            }
+            if header[f + 0x1d0..f + 0x1d4] != [0; 4] {
+                return Err(bad("sparse marker reserved bytes are occupied"));
+            }
+            header[f + 0x1d0..f + 0x1d4].copy_from_slice(b"DSPF");
+        }
         let hash = sha256(&header[f..f + 0x200]);
         header[0x280 + i * 32..0x2a0 + i * 32].copy_from_slice(&hash);
+    }
+    if any_sparse {
+        header[0x208..0x210].copy_from_slice(&raw.size.to_le_bytes());
+    } else {
+        let tail = entry
+            .size
+            .checked_sub(raw.size)
+            .ok_or_else(|| bad("NCA exceeds entry"))?;
+        let at = entry.start + raw.size;
+        raw.append(tail, Content::Disk(at))?;
     }
     header[0x200..0x204].copy_from_slice(b"DNCA");
     // A decrypted view needs neither encrypted key area nor personalized identifiers.
     header[0x230..0x240].fill(0);
     header[0x300..0x340].fill(0);
     spans.push(Span {
-        start: entry.start,
-        end: entry.start + 0xc00,
+        start: 0,
+        end: 0xc00,
         transform: Transform::Replace(header),
     });
-    Ok(())
+    spans.sort_by_key(|s| s.start);
+    for pair in spans.windows(2) {
+        if pair[0].end > pair[1].start {
+            return Err(bad("overlapping decryption ranges"));
+        }
+    }
+    Ok((
+        raw.size,
+        Decrypted {
+            file: Box::new(raw),
+            spans,
+            holes,
+        },
+    ))
 }
+// (logical start, logical end, absolute physical offset; None is a hole).
+type SparseRange = (u64, u64, Option<u64>);
+fn sparse_map(
+    file: &mut File,
+    entry: &Entry,
+    fs: &[u8],
+    logical_size: u64,
+    key: &[u8; 16],
+    upper: [u8; 8],
+) -> io::Result<Vec<SparseRange>> {
+    let count = u32le(fs, 0x160) as usize;
+    let generation = u16::from_le_bytes(fs[0x170..0x172].try_into().unwrap());
+    if &fs[0x158..0x15c] != b"BKTR"
+        || u32le(fs, 0x15c) != 1
+        || u32le(fs, 0x164) != 0
+        || generation == 0
+        || fs[0x172..0x178] != [0; 6]
+    {
+        return Err(bad("invalid sparse table header"));
+    }
+    if count == 0 {
+        return Ok(vec![(0, logical_size, None)]);
+    }
+    // 16 KiB entry sets, 20 bytes per mapping. This cap also bounds the tree
+    // to a single index node and limits allocation independently of file size.
+    if count > 1_000_000 {
+        return Err(bad("sparse entry count exceeds limit"));
+    }
+    let blocks = count.div_ceil(818);
+    let table_at = u64le(fs, 0x148);
+    let table_size = u64le(fs, 0x150);
+    let physical = u64le(fs, 0x168);
+    if table_size > 64 * 1024 * 1024 || table_size < ((blocks + 1) * 0x4000) as u64 {
+        return Err(bad("sparse table size outside limits"));
+    }
+    if physical < 0xc00 {
+        return Err(bad("sparse storage overlaps NCA header"));
+    }
+    let table = range(physical, table_at, entry.size)?;
+    range(table, table_size, entry.size)?;
+    let mut data = bytes(file, entry.start + table, table_size as usize)?;
+    let mut iv = upper;
+    iv[4..].copy_from_slice(&((generation as u32) << 16).to_be_bytes());
+    ctr(&mut data, &Aes128::new(key.into()), iv, table);
+    if u32le(&data, 0) != 0 || u32le(&data, 4) as usize != blocks || u64le(&data, 8) != logical_size
+    {
+        return Err(bad(
+            "invalid sparse index (wrong title key or damaged input)",
+        ));
+    }
+    let mut entries = Vec::with_capacity(count);
+    let mut previous_end = 0;
+    for block in 0..blocks {
+        let p = (block + 1) * 0x4000;
+        let n = u32le(&data, p + 4) as usize;
+        let end = u64le(&data, p + 8);
+        let expected = (count - entries.len()).min(818);
+        if u32le(&data, p) as usize != block
+            || n != expected
+            || end <= previous_end
+            || end > logical_size
+            || u64le(&data, 16 + block * 8) != previous_end
+        {
+            return Err(bad("invalid sparse entry set"));
+        }
+        for j in 0..n {
+            let q = p + 16 + j * 20;
+            let offset = u64le(&data, q);
+            let stored = u64le(&data, q + 8);
+            let storage = u32le(&data, q + 16);
+            if (j == 0 && offset != previous_end)
+                || offset >= end
+                || storage > 1
+                || stored > i64::MAX as u64
+                || entries.last().is_some_and(|(last, _, _)| *last >= offset)
+            {
+                return Err(bad("invalid or unsorted sparse mapping"));
+            }
+            entries.push((offset, stored, storage));
+        }
+        previous_end = end;
+    }
+    if entries.len() != count || previous_end != logical_size {
+        return Err(bad("incomplete sparse section coverage"));
+    }
+    let mut result = Vec::with_capacity(count);
+    for (i, &(at, stored, storage)) in entries.iter().enumerate() {
+        let end = entries.get(i + 1).map(|e| e.0).unwrap_or(logical_size);
+        let physical_at = if storage == 0 {
+            // Mapped content must not read into its own mapping-table metadata.
+            range(stored, end - at, table_at)?;
+            Some(entry.start + physical + stored)
+        } else {
+            None
+        };
+        result.push((at, end, physical_at));
+    }
+    Ok(result)
+}
+
 fn hash_target(fs: &[u8]) -> io::Result<u64> {
     match fs[3] {
         2 | 5 => {
@@ -566,7 +836,7 @@ fn hash_target(fs: &[u8]) -> io::Result<u64> {
     }
 }
 fn extended(
-    file: &mut File,
+    file: &mut dyn SourceReader,
     nca: u64,
     start: u64,
     size: u64,
@@ -609,7 +879,8 @@ fn extended(
     if (blocks + 1) * 0x4000 > table_size as usize {
         return Err(bad("truncated CTR-EX table"));
     }
-    let mut data = bytes(file, nca + start + table_at, table_size as usize)?;
+    let mut data = vec![0; table_size as usize];
+    file.read_at(nca + start + table_at, &mut data)?;
     ctr(&mut data, &Aes128::new(key.into()), upper, start + table_at);
     let mut entries = Vec::with_capacity(count);
     let mut previous_end = 0;
@@ -710,9 +981,9 @@ fn extended(
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct Temp(std::path::PathBuf);
+    pub(super) struct Temp(pub(super) std::path::PathBuf);
     impl Temp {
-        fn new(data: &[u8]) -> Self {
+        pub(super) fn new(data: &[u8]) -> Self {
             use std::sync::atomic::{AtomicU64, Ordering};
             static ID: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
@@ -796,7 +1067,11 @@ mod tests {
                     &mut file, 0, start, 0x10000, &fs, &key, upper, 0, &mut spans,
                 )
                 .unwrap();
-                let mut view = Decrypted { file, spans };
+                let mut view = Decrypted {
+                    file: Box::new(file),
+                    spans,
+                    holes: Vec::new(),
+                };
                 let mut actual = vec![0; 0x10000];
                 // Odd read boundaries exercise transitions into metadata and between tables.
                 for (i, chunk) in actual.chunks_mut(997).enumerate() {
