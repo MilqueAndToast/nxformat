@@ -1,24 +1,11 @@
-## Local decryption fork — support status
-
-[Download Preview 2 for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.2-local-decryption.2). Requires your own matching keys.
-
-| Feature | Status |
-|---|---|
-| Switch NCA3 NSP/XCI decryption, base/update/DLC | Tested with real dumps; CTR and CTR-EX supported |
-| Sparse NCA3 and skip-hash modes | Implemented; synthetic tests only. Sparse base/update conversion and strict NX verification pass; real sparse games remain untested |
-| Encrypted Switch 2, NCA0/NCA2, XTS content sections, NCZ/NSZ/XCZ | Unsupported |
-| Emulator gameplay; this fork on Linux/macOS | Untested |
-
-Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Missing content still requires its matching update. Originals stay intact; optional rebuild recipes recreate decrypted bytes. See [usage and key requirements](LOCAL-DECRYPTION.md) and [test details](TESTING.md). The upstream documentation below also covers already-decrypted Switch 2 input.
-
 <p align="center">
   <img src="docs/nxformat.png" alt="NXFormat" width="900">
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/fab918/nxformat" height="20" align="top"></a>
-  <a href="https://github.com/fab918/nxformat/actions/workflows/ci.yml"><img alt="Tests and conformance" src="https://github.com/fab918/nxformat/actions/workflows/ci.yml/badge.svg?branch=main" height="20" align="top"></a>
-  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.2"><img alt="NXFormat v1.0.2" src="https://img.shields.io/badge/release-v1.0.2-blue" height="20" align="top"></a>
+  <a href="https://github.com/fab918/nxformat/actions/workflows/ci.yml"><img alt="Upstream tests and conformance" src="https://github.com/fab918/nxformat/actions/workflows/ci.yml/badge.svg?branch=main" height="20" align="top"></a>
+  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.2-local-decryption.2"><img alt="Local Decryption Preview 2" src="https://img.shields.io/badge/release-Preview%202-blue" height="20" align="top"></a>
   <img alt="Switch 1 and Switch 2" src="https://img.shields.io/badge/Switch-1%20%26%202-337ab7" height="20" align="top">
   <img alt="C++17 reader" src="https://img.shields.io/badge/reader-C%2B%2B17-00599C" height="20" align="top">
 </p>
@@ -31,7 +18,7 @@ Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Missing 
 </p>
 
 <p align="center">
-  <a href="https://github.com/fab918/nxformat/releases/tag/V1.0.2"><strong>Download NXConvert 1.0.2</strong></a>
+  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.2-local-decryption.2"><strong>Download NXConvert — Preview 2</strong></a>
   &nbsp;·&nbsp;
   <a href="#performance-nx-vs-nup">NX vs NUP</a>
   &nbsp;·&nbsp;
@@ -40,23 +27,43 @@ Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Missing 
   <a href="docs/SPEC.md">Format specification</a>
 </p>
 
+Fork of [fab918/nxformat](https://github.com/fab918/nxformat). Credit to its author and contributors for NXFormat, NXConvert, and the original documentation below.
+
 - 🚀 **Modern format built for speed.** Designed to reduce decompression-related stutter. **104× faster median random reads than NUP** in the local benchmark described below. [See performance](#performance-nx-vs-nup).
 - ✏️ **Updates and DLC, in place.** Add or remove content without copying the base game during normal edits.
 - 🧩 **Store shared content once.** Reuse identical blocks across game files, updates and DLC.
 - 🎮 **Switch 1 and Switch 2.** Convert supported decrypted **DNSP/DXCI** packages, extracted folders and NUP archives.
-- 📦 **Rebuild source packages.** Without local decryption, native package conversions keep original-byte recipes by default. With local decryption, recipes default off and explicit recipes rebuild decrypted bytes. Rebuilding needs all referenced content. [Learn more](LOCAL-DECRYPTION.md).
+- 📦 **Get your original files back.** Native package conversions try to keep a recipe to recreate the original bytes (on by default without local decryption, `--no-recipe` to skip it). Rebuilding needs all referenced content. [Learn more](docs/RECIPE.md).
 - 🛡️ **Spot damaged game files.** Built-in integrity checks detect corruption during reads or a full archive check.
 - 🛠️ **Emulator ready.** C++17 reader, Rust library and C API for Windows, Linux, macOS and Android (libraries). [Integration](#developer-integration).
 
 > **Legal note**
-> **Local Decryption fork:** this fork adds streaming decryption for supported encrypted Switch NSP/XCI inputs using your own local `prod.keys` and optional `title.keys`. It includes no keys or game content. See [LOCAL-DECRYPTION.md](LOCAL-DECRYPTION.md) for usage, support limits, and recipe semantics. Upstream behavior and documentation below otherwise remain applicable.
+> <sub>Use your own game dumps and matching keys. This fork contains no keys or copyrighted game content.</sub>
+
+## Added in this fork
+
+- **Local decryption:** load `prod.keys` and optional `title.keys` in the GUI or CLI to convert supported encrypted NSP/XCI files directly, with matching updates and DLC.
+- **Sparse NCA3:** stream mapped content and generate missing regions as zeros, without a full decrypted temporary package. Missing game data still requires its matching update.
+
+Originals remain intact. With decryption enabled, recipes default off; enabled recipes rebuild decrypted bytes. [Usage and key requirements](LOCAL-DECRYPTION.md).
+
+## Support and testing
+
+| Feature | Status |
+|---|---|
+| NCA3 NSP/XCI, CTR and CTR-EX decryption | Tested with real game dumps |
+| Sparse NCA3 and skip-hash modes | Synthetic tests only; sparse base/update conversion, strict NX verification and recipe replay pass. Real sparse games remain untested |
+| Encrypted Switch 2, NCA0/NCA2, XTS content sections, NCZ/NSZ/XCZ | Unsupported |
+| Emulator gameplay; this fork on Linux/macOS | Untested |
+
+Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Already-decrypted Switch 2 inputs retain upstream support. [Test details](TESTING.md).
 
 ## Quick start
 
 **NXConvert 1.0.2** creates NXFormat 1.0.2 archives with separate header pages.
-Download the [V1.0.2 release](https://github.com/fab918/nxformat/releases/tag/V1.0.2),
-or build from source below. Desktop apps are available for Windows, Linux and
-macOS; Android packages provide libraries only.
+Download [Preview 2 for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.2-local-decryption.2)
+from [this fork's releases](https://github.com/MilqueAndToast/nxformat/releases),
+or build from source below. Current fork releases include the Windows app and source only.
 
 Build with Rust 1.95 or newer:
 
@@ -115,6 +122,8 @@ can repeat this kind of measurement on your own dumps.
 *NX skips compression with marginal savings, favoring faster packing and reads for a little extra space.*
 
 ## Developer integration
+
+The SDK packaging and release-workflow instructions below are inherited from upstream. This fork's current previews do not include multi-platform SDK or xmake bundles.
 
 [ffi/include/nxformat.h](ffi/include/nxformat.h) runs any `nxconvert` command
 in process: each output line goes to a callback, and a cancel handle stops the
