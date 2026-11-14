@@ -60,7 +60,7 @@ Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Already-
 
 ## Quick start
 
-**NXConvert 1.0.2** creates NXFormat 1.0.2 archives with separate header pages.
+**The current source includes upstream NXConvert 1.0.3** and writes NX archives with separate header pages. The existing NX wire formats are unchanged. The packaged release below remains Local Decryption 1.0.2.2 until a new build is published.
 Download [Local Decryption 1.0.2.2 for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/download/v1.0.2-local-decryption.2/NXConvert-Local-Decryption-1.0.2.2-Windows-x64.zip)
 from [this fork's releases](https://github.com/MilqueAndToast/nxformat/releases),
 or build from source below. Current fork releases include the Windows app and source only.
@@ -152,7 +152,7 @@ platform (Windows x64, Linux x64 and arm64, macOS universal, Android arm64):
 `bin/` (the Windows DLL and desktop NXConvert app). Android archives contain
 libraries and headers only. `SHA256SUMS` is a separate release attachment.
 
-For xmake, download `nxformat-xmake-1.0.2.zip` from the release and extract it.
+For xmake, download `nxformat-xmake-1.0.3.zip` from the release and extract it.
 It contains the package recipe with the published archive hashes. Point xmake
 at that extracted directory:
 
@@ -218,7 +218,7 @@ links the reader for play, and the nxformat library for every change.
 
 ## Documentation and development
 
-- [RELEASE.md](docs/RELEASE.md): V1.0.2 release notes and platform packages.
+- [RELEASE.md](docs/RELEASE.md): V1.0.3 release notes and platform packages.
 - [SPEC.md](docs/SPEC.md): wire format and versioning.
 - [CLI.md](docs/CLI.md): commands, native/NUP imports, extracted-tree declarations and resource limits.
 - [READER.md](docs/READER.md): C++ API, persistent sessions, emulator integration and access profiles.

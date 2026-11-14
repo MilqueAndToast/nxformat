@@ -21,3 +21,9 @@ The GUI and workflow remain upstream NXConvert with a key selector and clarified
 Explicit unsupported scope: encrypted Switch 2 input, NCA0/NCA2, AES-XTS content sections, NCZ/NSZ/XCZ, sparse trees above 1,000,000 entries or 64 MiB per-section table data. Sparse support cannot recover absent data; some bases need their matching update. Emulator gameplay has not been tested. Discovery warnings for conflicting duplicate Sword DLC and missing Scarlet/Tears of the Kingdom bases are documented in the test matrix.
 
 Private local fixtures/outputs/logs are under `results/local-decryption/`, which is gitignored and excluded from both deliverables. User key values and game data are not tracked, packaged, or uploaded. The original game library and emulator installation were not modified by this work.
+
+## Upstream sync — 2026-11-14
+
+Merged upstream main through `10ad8f5` (NXConvert 1.0.3, native extraction/restoration and recipe-speed improvements). Local-key decryption, sparse NCA mapping, key-aware artwork and explicit decrypted recipe semantics are retained. README links continue to point to the published 1.0.2.2 release; the merged source and locally built `app/target/release/nxconvert.exe` report 1.0.3. No new release was published by this merge.
+
+Validation: full locked packer suite passed (263 tests, one intentionally ignored), 11 GUI tests passed, packer formatting and patch whitespace checks passed, and the Windows release build succeeded. A real encrypted Wargroove NSP converted with paranoid source comparison, passed strict NX verification, extracted with a required restoration recipe, and restored to an NX with an identical SHA-256. The full suite was run outside the sandbox to allow its Windows junction fixture. Test logs and private conversion outputs remain under ignored `results/local-decryption/`.

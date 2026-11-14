@@ -1,10 +1,10 @@
 [package]
 name = "nxformat-packer"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
-description = "Source-independent NXFormat 1.0.2 archive writer"
+description = "Source-independent NXFormat 1.0.3 archive writer"
 
 [lib]
 name = "nxformat_packer"
@@ -19,7 +19,7 @@ aes = { version = "=0.8.4", features = ["zeroize"] }
 zeroize = "=1.8.2"
 same-file = "=1.0.6"
 sha2 = { version = "=0.10.9", optional = true }
-zstd = { version = "=0.14.3", default-features = false, features = ["experimental"] }
+zstd = { version = "=0.14.3", default-features = false, features = ["experimental", "zstdmt"] }
 
 [dev-dependencies]
 

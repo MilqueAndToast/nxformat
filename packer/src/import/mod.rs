@@ -4,6 +4,7 @@ mod convert;
 mod manifest;
 mod nup;
 mod secure;
+pub(crate) use secure::Root as SourceRoot;
 pub mod structures;
 pub mod synthetic;
 pub mod synthetic_nup;
@@ -15,7 +16,7 @@ pub use convert::{
     add_extracted, convert_extracted, verify_extracted_sources, ImportReceipt, TreeAdditionStats,
     TreeConversionStats,
 };
-pub(crate) use convert::{convert_extracted_external, External, PackageMetadata};
+pub(crate) use convert::{convert_extracted_external, External, PackageMetadata, RestoredMetadata};
 pub use manifest::{
     addon_belongs_to, Composition, DeclarationManifest, ManifestSelection, SnapshotDeclaration,
 };
@@ -27,6 +28,19 @@ use std::path::PathBuf;
 pub use tree::{
     audit_executables, discover, inspect_tree, ExecutableAudit, SourceFile, TreeCandidate, TreeView,
 };
+
+/// Independent declaration sidecar written by full filesystem extraction.
+pub const EXTRACTION_MANIFEST: &str = "extracted.nximport";
+
+/// Read explicit associations without requiring a restoration recipe. The
+/// source root pins the directory and rejects symlinks/path traversal.
+pub fn inspect_extraction_manifest(
+    directory: impl AsRef<std::path::Path>,
+    limits: &ImportLimits,
+) -> Result<DeclarationManifest, WriterError> {
+    let root = SourceRoot::open(directory.as_ref())?;
+    DeclarationManifest::read(root.open_relative(EXTRACTION_MANIFEST)?, limits)
+}
 
 #[derive(Clone, Debug)]
 pub struct ImportLimits {
