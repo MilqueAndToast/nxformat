@@ -13,14 +13,14 @@ and executable, and `ffi/` exposes the same commands through a C API.
 nxconvert scan SOURCE|FOLDER...
 nxconvert pack SOURCE... OUTPUT.nx [--no-recipe [--omit-firmware]]
 nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2]
-nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2
+nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--nup-map FILE]
 nxconvert contents ARCHIVE.nx
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]]
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N]
 nxconvert remove ARCHIVE.nx SNAPSHOT_IDENTITY...
 nxconvert compact ARCHIVE.nx [--no-compress]
 nxconvert verify ARCHIVE.nx [PACKAGE RECEIPT]
-nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc]
+nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] [--nup-map FILE]
 nxconvert set-metadata ARCHIVE.nx APPLICATION_ID [title=TEXT] [publisher=TEXT] [icon=FILE.jpg|png]
 nxconvert recipe ARCHIVE.nx SOURCE|RECIPE.nxrecipe...
 nxconvert rebuild ARCHIVE.nx FOLDER [RECIPE_ID...]
@@ -47,6 +47,9 @@ Rebuilding requires the recipe and all referenced content; see [RECIPE.md](RECIP
 `PACKAGE RECEIPT`, it also compares extracted source bytes and provenance.
 `check-nup` compares imported NUP paths, NACP and file bytes against NX; it does
 not validate every NUP display-metadata TLV.
+
+This fork additionally supports explicit [multi-program NUP compatibility mappings](NUP-COMPATIBILITY.md).
+Without `--nup-map`, ordinary NUP v1 validation remains strict.
 
 ## Display title and artwork
 

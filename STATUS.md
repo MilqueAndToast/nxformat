@@ -27,3 +27,25 @@ Private local fixtures/outputs/logs are under `results/local-decryption/`, which
 Merged upstream main through `10ad8f5` (NXConvert 1.0.3, native extraction/restoration and recipe-speed improvements). Local-key decryption, sparse NCA mapping, key-aware artwork and explicit decrypted recipe semantics are retained. README links continue to point to the published 1.0.2.2 release; the merged source and locally built `app/target/release/nxconvert.exe` report 1.0.3. No new release was published by this merge.
 
 Validation: full locked packer suite passed (263 tests, one intentionally ignored), 11 GUI tests passed, packer formatting and patch whitespace checks passed, and the Windows release build succeeded. A real encrypted Wargroove NSP converted with paranoid source comparison, passed strict NX verification, extracted with a required restoration recipe, and restored to an NX with an identical SHA-256. The full suite was run outside the sandbox to allow its Windows junction fixture. Test logs and private conversion outputs remain under ignored `results/local-decryption/`.
+
+## Explicit multi-program NUP import — 2026-11-14
+
+Implemented an opt-in, TOC-bound `.nxnupmap` through CLI `--nup-map` and GUI
+**Load NUP mapping…**. Strict ordinary NUP validation remains the default.
+Mapping validation retains native Program IDs/profiles, stable primary/auxiliary
+roles, application/platform/version relationships, same-program update bases
+and separate DLC. Embedded CNMTs constrain the mapping; conversion revalidates
+it. Extra roots and original labels are preserved in explicit data namespaces.
+See [usage and limitations](docs/NUP-COMPATIBILITY.md).
+
+Validation: 267 packer tests passed (one intentionally ignored), 12 GUI tests
+passed, formatting/whitespace checks passed, and the Windows build and CLI smoke
+checks succeeded. Synthetic cases cover valid mappings, ambiguity/corruption
+rejection, conversion and extraction. Real XCDE converted, passed strict NX
+verification and mapped comparison of all 37,718 source files plus provenance
+and two NACPs. The real source was opened read-only. Completeness remains a
+declaration; no emulator boot, program selection, DLC access or gameplay was
+tested. No new release was published or existing release asset replaced.
+
+Private evidence and the reviewed XCDE mapping: `results/multi-program-nup/`.
+Local Windows package: `dist-release/NXConvert-Local-Decryption-Windows-x64.zip`.

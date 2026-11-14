@@ -6,7 +6,7 @@ use crate::{inspect_archive, IntegrityPolicy, SnapshotType};
 
 const APP: u64 = 0x0400_0000_0000_1000;
 
-fn work(name: &str) -> PathBuf {
+pub(super) fn work(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("nx-nup-test-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();

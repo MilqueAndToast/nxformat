@@ -195,6 +195,8 @@ impl App {
             self.focused = games.first().map(|g| g.key.clone()).unwrap_or_default();
         }
         let mut removed = None;
+        let mut mapping_request = None;
+        let mapping_enabled = !self.busy();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -344,6 +346,19 @@ impl App {
                                         });
                                 });
                             }
+                            if source.kind == SourceKind::Nup {
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(mapping_enabled, egui::Button::new("Load NUP mapping…")).clicked() {
+                                        if let Some(path)=rfd::FileDialog::new().add_filter("NUP mapping", &["nxnupmap"]).pick_file() {
+                                            mapping_request=Some((source.path.clone(),Some(path)));
+                                        }
+                                    }
+                                    if let Some(path)=&source.nup_mapping {
+                                        ui.label("Explicit compatibility mapping active").on_hover_text(text(path));
+                                        if ui.add_enabled(mapping_enabled,egui::Button::new("Remove mapping")).clicked() {mapping_request=Some((source.path.clone(),None));}
+                                    }
+                                });
+                            }
                             if !source.issue.is_empty() {
                                 ui.colored_label(ui.visuals().warn_fg_color, &source.issue);
                             }
@@ -400,6 +415,12 @@ impl App {
                 for source in self.sources.iter().filter(|s| s.contents.is_empty()) {
                     theme::card().show(ui, |ui| {
                         ui.strong(file_name(&source.path));
+                        if source.kind == SourceKind::Nup && ui.add_enabled(mapping_enabled,egui::Button::new("Load NUP mapping…")).clicked() {
+                            if let Some(path)=rfd::FileDialog::new().add_filter("NUP mapping", &["nxnupmap"]).pick_file() {mapping_request=Some((source.path.clone(),Some(path)));}
+                        }
+                        if source.nup_mapping.is_some() && ui.add_enabled(mapping_enabled, egui::Button::new("Remove mapping")).clicked() {
+                            mapping_request=Some((source.path.clone(),None));
+                        }
                         ui.colored_label(
                             ui.visuals().warn_fg_color,
                             if source.issue.is_empty() {
@@ -413,6 +434,13 @@ impl App {
             });
         if let Some(game) = removed {
             self.remove_game(game);
+        }
+        if let Some((source, mapping)) = mapping_request {
+            let mut args = vec!["scan-nup-map".into(), text(&source)];
+            if let Some(path) = mapping {
+                args.push(text(&path));
+            }
+            self.push("Checking NUP mapping", args, Purpose::Scan);
         }
     }
 
@@ -1008,9 +1036,9 @@ impl eframe::App for App {
                                         self.keys_path = Some(path);
                                         self.recipe = false;
                                         self.status = "Keys loaded. Encrypted NSP/XCI files can now be added.".into();
-                                        let paths = self.sources.iter().map(|s| s.path.clone()).collect();
-                                        self.sources.clear();
-                                        self.textures.clear();
+                                        let paths = self.sources.iter().filter(|s|s.kind!=SourceKind::Nup).map(|s| s.path.clone()).collect();
+                                        self.sources.retain(|s|s.kind==SourceKind::Nup);
+                                        self.textures.retain(|p,_|self.sources.iter().any(|s| &s.path==p));
                                         self.scan(paths);
                                     }
                                     Err(error) => self.status = format!("Cannot load keys: {error}"),

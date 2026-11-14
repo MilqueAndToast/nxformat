@@ -22,6 +22,8 @@ use super::*;
 use crate::hash::Sha256;
 use crate::native::NACP_LANGUAGE_MAP;
 use crate::WriterOptions;
+mod compatibility;
+pub use compatibility::inspect_nup_with_mapping;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
@@ -37,6 +39,8 @@ pub(super) const FILE: usize = 0x50;
 
 #[derive(Clone, Debug, Default)]
 pub struct NupOptions {
+    /// Explicit opt-in mapping; never discovered or activated implicitly.
+    pub mapping: Option<PathBuf>,
     /// Caller-declared platform. NUP v1 does not encode a platform field.
     pub platform: Option<crate::Platform>,
     /// Leave add-ons out instead of failing. They are listed in the stage.
@@ -303,6 +307,7 @@ struct NupFile {
     codec: u8,
 }
 struct Toc {
+    digest: [u8; 32],
     packages: Vec<Package>,
     dirs: Vec<Directory>,
     files: Vec<NupFile>,
@@ -470,6 +475,7 @@ fn read_toc(file: &mut File, limits: &ImportLimits) -> Result<(Toc, u64), Writer
         .collect();
     Ok((
         Toc {
+            digest: crate::hash::sha256(&toc),
             packages,
             dirs,
             files,
@@ -1156,6 +1162,37 @@ fn stage_nup_bounded(
     cancelled(token)?;
     let mut source = File::open(nup)?;
     let (toc, physical) = read_toc(&mut source, limits)?;
+    let mapping = nup_options
+        .mapping
+        .as_ref()
+        .map(|p| compatibility::Mapping::read(p, nup, &toc, limits, token))
+        .transpose()?;
+    if mapping
+        .as_ref()
+        .is_some_and(|m| Some(m.manifest.snapshots[0].platform) != nup_options.platform)
+    {
+        return Err(bad("--platform contradicts the explicit NUP mapping"));
+    }
+    let declaration = |p: &Package| {
+        mapping.as_ref().and_then(|m| {
+            m.indices
+                .iter()
+                .position(|i| std::ptr::eq(&toc.packages[*i], p))
+                .map(|j| &m.manifest.snapshots[j])
+        })
+    };
+    let package_tree = |p: &Package| -> Result<Tree, WriterError> {
+        if let Some(m) = &mapping {
+            let j = m
+                .indices
+                .iter()
+                .position(|i| std::ptr::eq(&toc.packages[*i], p))
+                .unwrap();
+            Ok(m.trees[j].clone())
+        } else {
+            toc.package_tree(p, limits)
+        }
+    };
     // Decoded bytes written to the stage. Streamed, only ExeFS is staged.
     let stage_ceiling = if nup_options.stream {
         limits.max_executable_bytes
@@ -1179,7 +1216,7 @@ fn stage_nup_bounded(
         if snapshots > limits.max_snapshots {
             return Err(limit("NUP snapshot budget"));
         }
-        let tree = toc.package_tree(p, limits)?;
+        let tree = package_tree(p)?;
         if tree
             .files
             .get("exefs/main.npdm")
@@ -1206,24 +1243,37 @@ fn stage_nup_bounded(
     fs::create_dir(&package_root)?;
 
     let bases: Vec<_> = toc.packages.iter().filter(|p| p.kind == 0).collect();
-    if bases.len() > 1 {
+    if mapping.is_none() && bases.len() > 1 {
         return Err(bad("more than one base package"));
     }
-    let base = bases.first().copied();
+    let base = if mapping.is_some() {
+        None
+    } else {
+        bases.first().copied()
+    };
     let mut skipped = Vec::new();
     let mut text = "NXIMPORT\t1\n".to_owned();
-    let mut base_tree = None;
+    let mut base_trees: BTreeMap<String, Tree> = BTreeMap::new();
     let mut buffer = vec![0u8; 1 << 20];
     let mut keys = BTreeSet::new();
     // Base first, so updates can link to its staged files.
     let mut order: Vec<&Package> = toc.packages.iter().collect();
-    order.sort_by_key(|p| (p.kind != 0, p.version));
+    order.sort_by_key(|p| {
+        declaration(p)
+            .map(|d| {
+                (
+                    d.snapshot_type != crate::SnapshotType::Base,
+                    d.numeric_version,
+                )
+            })
+            .unwrap_or((p.kind != 0, p.version))
+    });
     let mut counted = 0usize;
     for p in &order {
         if (p.kind == 2 && nup_options.skip_addons) || nup_options.stream {
             continue;
         }
-        let own = toc.package_tree(p, limits)?;
+        let own = package_tree(p)?;
         charge_entries(&mut counted, &own, max_entries)?;
         nup_options
             .progress
@@ -1251,7 +1301,11 @@ fn stage_nup_bounded(
             });
             continue;
         }
-        let (snapshot_type, application) = package_role(p, base.is_some())?;
+        let mapped = declaration(p);
+        let (snapshot_type, application) = match mapped {
+            Some(d) => (d.snapshot_type, d.application_id),
+            None => package_role(p, base.is_some())?,
+        };
         let (kind, key) = match snapshot_type {
             crate::SnapshotType::Base => ("base", "base".to_owned()),
             crate::SnapshotType::Update => ("update", format!("update-{}", p.version)),
@@ -1261,6 +1315,7 @@ fn stage_nup_bounded(
             crate::SnapshotType::Dlc => ("dlc", format!("dlc-{}-{}", hex16(p.title_id), p.version)),
             crate::SnapshotType::Unknown => return Err(unsupported("unknown NUP snapshot type")),
         };
+        let key = mapped.map(|d| d.key.clone()).unwrap_or(key);
         if let Some(b) = base {
             if application != b.title_id {
                 return Err(bad("update belongs to another application"));
@@ -1269,8 +1324,11 @@ fn stage_nup_bounded(
         if !keys.insert(key.clone()) {
             return Err(bad("two updates share one version"));
         }
-        let own = toc.package_tree(p, limits)?;
-        let tree = match (kind, &base_tree) {
+        let own = package_tree(p)?;
+        let base_key = mapped
+            .and_then(|d| d.dependencies.first().map(|(_, k)| k.as_str()))
+            .unwrap_or("base");
+        let tree = match (kind, base_trees.get(base_key)) {
             ("update", Some(b)) => overlay(b, &own)?,
             _ => own,
         };
@@ -1279,6 +1337,13 @@ fn stage_nup_bounded(
         let root = format!("trees/{key}");
         let root_path = package_root.join(&root);
         fs::create_dir_all(&root_path)?;
+        if let Some(map) = &mapping {
+            fs::create_dir_all(root_path.join("data"))?;
+            budget.write(
+                &root_path.join("data/__nup_mapping__.txt"),
+                map.provenance(&toc).as_bytes(),
+            )?;
+        }
         for d in &tree.dirs {
             fs::create_dir_all(root_path.join(d))?;
         }
@@ -1323,7 +1388,7 @@ fn stage_nup_bounded(
                 return Err(limit("NUP files to stage exceed the staging byte budget"));
             }
             if index & BASE_BIT != 0 {
-                let from = package_root.join("trees/base").join(path);
+                let from = package_root.join("trees").join(base_key).join(path);
                 if fs::hard_link(&from, &out).is_err() {
                     copy_inherited(
                         &from,
@@ -1352,7 +1417,16 @@ fn stage_nup_bounded(
             Ok(npdm) => npdm_profile(&npdm),
             Err(_) => "none",
         };
-        let (program, role) = if dlc {
+        let (program, role) = if let Some(d) = mapped {
+            (
+                d.program_id.map(hex16).unwrap_or_else(|| "-".into()),
+                match d.program_kind {
+                    crate::ProgramKind::Primary => "primary",
+                    crate::ProgramKind::Auxiliary => "auxiliary",
+                    _ => "none",
+                },
+            )
+        } else if dlc {
             ("-".to_owned(), "none")
         } else if profile == "none" {
             (hex16(application), "primary")
@@ -1362,15 +1436,20 @@ fn stage_nup_bounded(
         text.push_str(&format!(
             "snapshot\t{key}\t{root}\t{platform}\t{}\t{program}\t{role}\t{kind}\t{}\tcomplete\tmaterialized-v1\t{profile}\n",
             hex16(application),
-            p.version
+            mapped.map(|d|d.numeric_version).unwrap_or(p.version)
         ));
         if dlc {
             text.push_str(&format!("addon\t{key}\t{}\n", hex16(p.title_id)));
         }
         if kind == "update" {
-            text.push_str(&format!("dependency\t{key}\trequired-base\tbase\n"));
+            text.push_str(&format!("dependency\t{key}\trequired-base\t{base_key}\n"));
         }
         let meta = read_meta(&mut source, p, physical)?;
+        let meta = if let Some(d) = mapped {
+            compatibility::metadata(nup, &toc, &tree, d, meta, limits, token)?
+        } else {
+            meta
+        };
         if !dlc && meta.nacp.is_none() {
             // Switch 2 packages have no NACP: keep their own title and icons.
             if let Some(m) = meta.package_metadata() {
@@ -1407,7 +1486,7 @@ fn stage_nup_bounded(
             }
         }
         if kind == "base" {
-            base_tree = Some(tree);
+            base_trees.insert(key.clone(), tree);
         }
     }
     if keys.is_empty() {
@@ -1462,20 +1541,63 @@ pub fn check_nup(
     limits: &ImportLimits,
     options: &WriterOptions,
 ) -> Result<NupCheck, WriterError> {
+    check_nup_impl(nup, archive, skip_addons, None, limits, options)
+}
+
+pub fn check_nup_with_mapping(
+    nup: &Path,
+    archive: &Path,
+    skip_addons: bool,
+    mapping: &Path,
+    limits: &ImportLimits,
+    options: &WriterOptions,
+) -> Result<NupCheck, WriterError> {
+    check_nup_impl(nup, archive, skip_addons, Some(mapping), limits, options)
+}
+
+fn check_nup_impl(
+    nup: &Path,
+    archive: &Path,
+    skip_addons: bool,
+    mapping: Option<&Path>,
+    limits: &ImportLimits,
+    options: &WriterOptions,
+) -> Result<NupCheck, WriterError> {
     let limits = limits.clone();
     let mut source = File::open(nup)?;
     let (toc, physical) = read_toc(&mut source, &limits)?;
     if toc.packages.len() > limits.max_snapshots {
         return Err(limit("NUP has more packages than the snapshot budget"));
     }
+    let mapping = mapping
+        .map(|p| compatibility::Mapping::read(p, nup, &toc, &limits, &options.cancellation))
+        .transpose()?;
+    let declaration = |p: &Package| {
+        mapping.as_ref().and_then(|m| {
+            m.indices
+                .iter()
+                .position(|i| std::ptr::eq(&toc.packages[*i], p))
+                .map(|j| &m.manifest.snapshots[j])
+        })
+    };
     let summary = crate::inspect_archive(archive, options, crate::IntegrityPolicy::Fast)?;
+    if mapping.is_none() && toc.packages.iter().filter(|p| p.kind == 0).count() > 1 {
+        return Err(bad(
+            "more than one base package; select an explicit compatibility mapping",
+        ));
+    }
     let base = toc.packages.iter().find(|p| p.kind == 0);
     let mut order: Vec<&Package> = toc.packages.iter().collect();
-    order.sort_by_key(|p| (p.kind != 0, p.version));
+    order.sort_by_key(|p| {
+        declaration(p)
+            .map(|d| (d.snapshot_type != SnapshotType::Base, d.numeric_version))
+            .unwrap_or((p.kind != 0, p.version))
+    });
     let mut out = NupCheck::default();
     let mut matched = BTreeSet::new();
     let mut base_tree = None;
     let mut base_identity = None;
+    let mut mapped_bases = BTreeMap::<String, (Tree, [u8; 32])>::new();
     // (first block index, block count) of files already read back.
     let mut read_back = BTreeSet::new();
     let mut work: Vec<(crate::SnapshotFileReference, [u8; 32], String)> = Vec::new();
@@ -1486,42 +1608,82 @@ pub fn check_nup(
         if p.kind == 2 && skip_addons {
             continue;
         }
-        let own = toc.package_tree(p, &limits)?;
+        let mapped = declaration(p);
+        let own = if let Some(m) = &mapping {
+            m.trees[m
+                .indices
+                .iter()
+                .position(|i| std::ptr::eq(&toc.packages[*i], p))
+                .unwrap()]
+            .clone()
+        } else {
+            toc.package_tree(p, &limits)?
+        };
         charge_entries(&mut resolved, &own, MAX_RESOLVED_ENTRIES)?;
-        let (tree, application, wanted): (Tree, u64, SnapshotFilter) = match p.kind {
-            0 => (
-                own.clone(),
-                p.title_id,
-                Box::new(|s| s.snapshot_type == SnapshotType::Base),
-            ),
-            1 => {
-                let tree = match &base_tree {
-                    Some(b) => overlay(b, &own)?,
-                    None => own,
-                };
-                let version = p.version;
-                (
-                    tree,
-                    p.title_id & !0xfff,
-                    Box::new(move |s| {
-                        matches!(
-                            s.snapshot_type,
-                            SnapshotType::Update | SnapshotType::StandaloneUpdate
-                        ) && s.numeric_version == version
-                    }),
-                )
-            }
-            _ => {
-                let (title, version) = (p.title_id, p.version);
-                (
-                    own,
-                    (p.title_id & !0xfff).wrapping_sub(0x1000),
-                    Box::new(move |s| {
-                        s.snapshot_type == SnapshotType::Dlc
-                            && s.addon_title_id == Some(title)
-                            && s.numeric_version == version
-                    }),
-                )
+        let (tree, application, wanted): (Tree, u64, SnapshotFilter) = if let Some(d) = mapped {
+            let tree = if d.snapshot_type == SnapshotType::Update {
+                overlay(
+                    &mapped_bases
+                        .get(&d.dependencies[0].1)
+                        .ok_or_else(|| bad("missing mapped base during verification"))?
+                        .0,
+                    &own,
+                )?
+            } else {
+                own
+            };
+            let (kind, version, program, addon) = (
+                d.snapshot_type,
+                d.numeric_version,
+                d.program_id,
+                d.addon_title_id,
+            );
+            (
+                tree,
+                d.application_id,
+                Box::new(move |s| {
+                    s.snapshot_type == kind
+                        && s.numeric_version == version
+                        && s.program_id == program
+                        && s.addon_title_id == addon
+                }),
+            )
+        } else {
+            match p.kind {
+                0 => (
+                    own.clone(),
+                    p.title_id,
+                    Box::new(|s| s.snapshot_type == SnapshotType::Base),
+                ),
+                1 => {
+                    let tree = match &base_tree {
+                        Some(b) => overlay(b, &own)?,
+                        None => own,
+                    };
+                    let version = p.version;
+                    (
+                        tree,
+                        p.title_id & !0xfff,
+                        Box::new(move |s| {
+                            matches!(
+                                s.snapshot_type,
+                                SnapshotType::Update | SnapshotType::StandaloneUpdate
+                            ) && s.numeric_version == version
+                        }),
+                    )
+                }
+                _ => {
+                    let (title, version) = (p.title_id, p.version);
+                    (
+                        own,
+                        (p.title_id & !0xfff).wrapping_sub(0x1000),
+                        Box::new(move |s| {
+                            s.snapshot_type == SnapshotType::Dlc
+                                && s.addon_title_id == Some(title)
+                                && s.numeric_version == version
+                        }),
+                    )
+                }
             }
         };
         let what = match p.kind {
@@ -1539,6 +1701,17 @@ pub fn check_nup(
                 ))
             })?;
         let mut found = app.snapshots.iter().filter(|s| wanted(s));
+        if let Some(d) = mapped {
+            if app.platform != d.platform
+                || d.program_id.is_some_and(|id| {
+                    !app.programs
+                        .iter()
+                        .any(|p| p.program_id == id && p.kind == d.program_kind)
+                })
+            {
+                return Err(bad("archive platform/program role differs from mapping"));
+            }
+        }
         let snapshot = found
             .next()
             .ok_or_else(|| bad(&format!("{what}: missing from the archive")))?;
@@ -1547,8 +1720,15 @@ pub fn check_nup(
         }
         matched.insert(snapshot.identity);
         out.snapshots += 1;
-        if p.kind == 1 {
-            if let Some(b) = base_identity {
+        if mapped
+            .map(|d| d.snapshot_type == SnapshotType::Update)
+            .unwrap_or(p.kind == 1)
+        {
+            let expected = mapped
+                .and_then(|d| d.dependencies.first())
+                .and_then(|(_, k)| mapped_bases.get(k).map(|b| b.1))
+                .or(base_identity);
+            if let Some(b) = expected {
                 if !snapshot
                     .dependencies
                     .iter()
@@ -1559,6 +1739,11 @@ pub fn check_nup(
             }
         }
         let meta = read_meta(&mut source, p, physical)?;
+        let meta = if let Some(d) = mapped {
+            compatibility::metadata(nup, &toc, &tree, d, meta, &limits, &options.cancellation)?
+        } else {
+            meta
+        };
         if let (true, Some(nacp)) = (p.kind != 2, &meta.nacp) {
             let stored = crate::read_snapshot_nacp(archive, snapshot.identity, options)?;
             if stored.as_deref() != Some(nacp.as_slice()) {
@@ -1574,6 +1759,17 @@ pub fn check_nup(
         )?;
         let mut by_path: BTreeMap<String, crate::SnapshotFileReference> =
             files.into_iter().map(|f| (f.path.clone(), f)).collect();
+        if let Some(map) = &mapping {
+            let bytes = map.provenance(&toc).into_bytes();
+            let stored = by_path
+                .remove("data/__nup_mapping__.txt")
+                .ok_or_else(|| bad("missing mapping provenance"))?;
+            let hash = crate::hash::sha256(&bytes);
+            if stored.size != bytes.len() as u64 || stored.digest != hash {
+                return Err(bad("mapping provenance differs"));
+            }
+            work.push((stored, hash, "mapping provenance".into()));
+        }
         for (path, index) in &tree.files {
             let f = &toc.files[index & !BASE_BIT];
             let stored = by_path
@@ -1596,7 +1792,12 @@ pub fn check_nup(
         if let Some(extra) = by_path.keys().next() {
             return Err(bad(&format!("{what}: {extra} is not in the NUP")));
         }
-        if p.kind == 0 {
+        if let Some(d) = mapped {
+            if d.snapshot_type == SnapshotType::Base {
+                mapped_bases.insert(d.key.clone(), (tree.clone(), snapshot.identity));
+            }
+        }
+        if p.kind == 0 && mapped.is_none() {
             base_tree = Some(tree);
             base_identity = Some(snapshot.identity);
         }

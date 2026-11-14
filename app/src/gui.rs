@@ -64,6 +64,8 @@ struct Source {
     restoration_invalid: bool,
     ignore_restore: bool,
     nup_platform: Option<Platform>,
+    nup_mapping: Option<PathBuf>,
+    nup_mapping_request: bool,
     icon: Option<Vec<u8>>,
     path: PathBuf,
     size: u64,
@@ -178,7 +180,18 @@ fn start(mut job: Job, ctx: &egui::Context) -> Running {
             let _ = lines.send(Message::Line(error, line.to_owned()));
             repaint.request_repaint();
         });
-        let result = if purpose == Purpose::Scan {
+        let result = if purpose == Purpose::Scan
+            && args.first().is_some_and(|a| a == "scan-nup-map")
+        {
+            let mut source = discovery::nup(
+                PathBuf::from(&args[1]),
+                args.get(2).map(PathBuf::from),
+                &token,
+            );
+            source.nup_mapping_request = true;
+            let _ = tx.send(Message::Sources(vec![source]));
+            Ok(())
+        } else if purpose == Purpose::Scan {
             discovery::scan(args[1..].iter().map(PathBuf::from).collect(), &token).map(|sources| {
                 let _ = tx.send(Message::Sources(sources));
             })
@@ -592,6 +605,79 @@ mod tests {
             assert_eq!(std::fs::read(&roundtrip).unwrap(), before);
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nup_mapping_load_replace_remove_and_cli_conversion() {
+        use super::{discovery, egui};
+        use nxformat_packer::import::{
+            structures::NpdmProfile,
+            synthetic::npdm,
+            synthetic_nup::{addon, base, build, Node},
+        };
+        use nxformat_packer::{cli, CancellationToken, IntegrityPolicy, Platform, WriterOptions};
+        let app_id = 0x0100_0000_1234_0000u64;
+        let sub = 0x0400_0000_1234_0001u64;
+        let dir = std::env::temp_dir().join(format!("nxconvert-mapped-nup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.nup");
+        let map = dir.join("game.nxnupmap");
+        let map2 = dir.join("copy.nxnupmap");
+        let mut primary = base(app_id);
+        for n in primary.exefs.iter_mut().flatten() {
+            if let Node::File("main.npdm", b) = n {
+                *b = npdm(app_id, NpdmProfile::MetaAcid2048V1);
+            }
+        }
+        let bytes = build(&[base(sub), primary, addon(app_id)], true);
+        std::fs::write(&path, &bytes).unwrap();
+        let hash = bytes[24..56]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let text=format!("NXNUPMAP\t1\t{hash}\nNXIMPORT\t1\nsnapshot\tmain\tpackage-1\tswitch2\t{app_id:016x}\t{app_id:016x}\tprimary\tbase\t0\tcomplete\tmaterialized-v1\tmeta-acid2048-v1\nsnapshot\tsub\tpackage-0\tswitch2\t{app_id:016x}\t{sub:016x}\tauxiliary\tbase\t0\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\nsnapshot\tdlc\tpackage-2\tswitch2\t{app_id:016x}\t-\tnone\tdlc\t0\tcomplete\tmaterialized-v1\tnone\naddon\tdlc\t{:016x}\n",app_id+0x1001);
+        std::fs::write(&map, &text).unwrap();
+        std::fs::write(&map2, &text).unwrap();
+        let token = CancellationToken::default();
+        let ctx = egui::Context::default();
+        let mut app = App {
+            sources: discovery::scan(vec![path.clone()], &token).unwrap(),
+            ..Default::default()
+        };
+        assert!(!app.sources[0].supported);
+        for mapping in [&map, &map2] {
+            let mut source = discovery::nup(path.clone(), Some(mapping.clone()), &token);
+            source.nup_mapping_request = true;
+            app.add_scanned_sources(vec![source], &ctx);
+            assert!(app.sources[0].supported);
+            assert_eq!(app.sources[0].nup_mapping.as_ref(), Some(mapping));
+            assert_eq!(app.sources[0].nup_platform, Some(Platform::Switch2));
+        }
+        app.add_scanned_sources(discovery::scan(vec![path.clone()], &token).unwrap(), &ctx);
+        assert_eq!(app.sources[0].nup_mapping.as_ref(), Some(&map2));
+        assert_eq!(app.games().len(), 1);
+        assert_eq!(app.games()[0].application, app_id);
+        let output = app.games()[0].output.clone().unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        assert!(job
+            .args
+            .windows(2)
+            .any(|a| a[0] == "--nup-map" && a[1] == map2.to_string_lossy()));
+        cli::run(job.args, None, Some(CancellationToken::default())).unwrap();
+        let summary = nxformat_packer::inspect_archive(
+            output,
+            &WriterOptions::default(),
+            IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        assert_eq!(summary.applications[0].snapshots.len(), 3);
+        let mut source = discovery::nup(path, None, &token);
+        source.nup_mapping_request = true;
+        app.add_scanned_sources(vec![source], &ctx);
+        assert!(!app.sources[0].supported);
+        assert!(app.sources[0].nup_mapping.is_none());
     }
 
     #[test]
@@ -1162,6 +1248,9 @@ impl App {
                     _ => continue,
                 };
                 args.extend(["--platform".into(), platform.into()]);
+                if let Some(mapping) = &selected[0].nup_mapping {
+                    args.extend(["--nup-map".into(), text(mapping)]);
+                }
             }
             if game.kind == SourceKind::Extracted {
                 if selected[0].ignore_restore {
@@ -1215,7 +1304,17 @@ impl App {
             let mut previous_defaults = None;
             if let Some(index) = existing {
                 let previous = &self.sources[index];
-                if previous.tree_roots.is_empty() || previous.tree_roots == source.tree_roots {
+                if previous.kind == SourceKind::Nup && source.kind == SourceKind::Nup {
+                    // A generic directory rescan must not deactivate an explicit
+                    // mapping. Explicit load/remove actions always replace it.
+                    if previous.nup_mapping.is_some()
+                        && source.nup_mapping.is_none()
+                        && !source.nup_mapping_request
+                    {
+                        continue;
+                    }
+                } else if previous.tree_roots.is_empty() || previous.tree_roots == source.tree_roots
+                {
                     continue;
                 }
                 if previous.supported && source.supported {

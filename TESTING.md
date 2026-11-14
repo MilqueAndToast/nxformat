@@ -1,6 +1,33 @@
 # Local-decryption validation
 
-For user-reported XCDE/NUP multi-program investigation findings and their verification limits, see [XCDE NUP findings](docs/XCDE-NUP-FINDINGS.md). That investigation is separate from the passing automated and conversion tests below.
+## Multi-program NUP compatibility — 2026-11-14
+
+The explicit [NUP mapping](docs/NUP-COMPATIBILITY.md) was checked on Windows x64:
+
+- Packer regression suite: 267 passed, one intentionally ignored; doctest run passed (no doctests). The Windows junction fixture ran outside the restricted sandbox.
+- GUI regression suite: 12 passed. Automated coverage includes rejected discovery, explicit mapping load/replacement/removal, rescan retention, application grouping and conversion using the GUI-generated command. Native file-picker interaction was not manually tested.
+- Synthetic coverage: mixed native Program IDs and ACID-2048/3072 profiles, primary/auxiliary roles, matching-program updates, separate DLC, streaming and fully staged conversion, strict verification, source comparison, extraction of extras/provenance and unchanged original input bytes.
+- Rejection coverage: stale TOC binding (including replacement after discovery), duplicate package roots, wrong profiles/IDs, ambiguous roles, cross-program dependencies, missing/extra/unrelated CNMT program offsets, duplicate offsets, platform/version/kind contradictions and corrupt compressed payloads.
+
+The original XCDE NUP (32,772,783,634 bytes) converted to a 32,597,862,072-byte
+NX and passed strict archive verification. The mapped source comparison passed
+for all 37,718 source files across three snapshots, reading back 31,681 distinct
+NX file block ranges (33,809,939,534 logical bytes) and checking two NACPs. It also
+verified program roles/platform and preserved extras/provenance. The Windows
+release build succeeded; its CLI help and real-NX contents commands passed smoke
+checks. It retains application
+`0100FF500E34A000` on Switch2, primary program `0100FF500E34A000` (ACID-2048),
+auxiliary program `0400FF500E34A001` (ACID-3072), both declared as complete
+standalone updates at version 262144, and separate DLC `0100FF500E34B001` v0.
+The original BASE-v0 container labels are retained as provenance. Completeness
+is declared, not established by NPDM/CNMT consistency or successful conversion.
+No emulator boot, program selection, DLC access or gameplay validation was done.
+The real source was opened read-only; no keys were needed. Private fixtures,
+mapping and logs remain under ignored `results/multi-program-nup/`.
+
+## Earlier local-decryption validation
+
+For the earlier XCDE/NUP investigation and its follow-up, see [XCDE NUP findings](docs/XCDE-NUP-FINDINGS.md). Current multi-program validation is recorded below separately from the earlier decryption tests.
 
 Validated on Windows x64 with Rust 1.95.0, using the owner's existing local key files and game dumps. No key values or game data are in the source or Windows distribution.
 

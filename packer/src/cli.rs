@@ -139,8 +139,8 @@ fn usage() -> &'static str {
 nxconvert inspect-tree PACKAGE MANIFEST KEY\n\
 nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2] [--tree-root RELATIVE_ROOT]... [--ignore-restore]\n\
 nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
-nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc]\n\
-nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
+nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc] [--nup-map FILE]\n\
+nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] [--nup-map FILE] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
 nxconvert pack SOURCE... OUTPUT.nx [--keys prod.keys] [--title-keys title.keys] [--no-recipe [--omit-firmware]]\n\
 --keys enables streaming NSP/XCI decryption; adjacent title.keys is loaded automatically. Recipes default OFF with keys; --recipe rebuilds decrypted bytes, not encrypted originals.\n\
 nxconvert recipe ARCHIVE.nx SOURCE|RECIPE.nxrecipe... (keep rebuild recipes inside the NX)\n\
@@ -186,6 +186,7 @@ struct Options {
     workers: Option<u8>,
     paranoid: bool,
     skip_dlc: bool,
+    nup_mapping: Option<PathBuf>,
     /// `--recipe` / `--no-recipe`; pack and add keep recipes unless told not to.
     recipe: Option<bool>,
     omit_firmware: bool,
@@ -267,6 +268,7 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
                 .ok_or("budget overflow")?)
         };
         match a.as_str() {
+            "--nup-map" => o.nup_mapping = Some(PathBuf::from(&value)),
             "--keys" => o.keys = Some(PathBuf::from(&value)),
             "--title-keys" => o.title_keys = Some(PathBuf::from(&value)),
             "--fallback-title" => o.fallback_title = Some(value.clone()),
@@ -800,13 +802,24 @@ fn check_nup(args: &[String], o: &Options) -> Result<(), Box<dyn std::error::Err
         max_inventory_bytes: o.inventory.unwrap_or(INVENTORY_CEILING),
         ..import::ImportLimits::for_nup()
     };
-    let check = import::check_nup(
-        Path::new(&args[1]),
-        Path::new(&args[2]),
-        o.skip_dlc,
-        &limits,
-        &options,
-    )?;
+    let check = if let Some(mapping) = &o.nup_mapping {
+        import::check_nup_with_mapping(
+            Path::new(&args[1]),
+            Path::new(&args[2]),
+            o.skip_dlc,
+            mapping,
+            &limits,
+            &options,
+        )?
+    } else {
+        import::check_nup(
+            Path::new(&args[1]),
+            Path::new(&args[2]),
+            o.skip_dlc,
+            &limits,
+            &options,
+        )?
+    };
     drop(watch);
     println!(
         "PASS snapshots={} files={} files_read={} bytes_verified={} nup_files_read={} nacp={} elapsed_s={:.3}",
@@ -845,6 +858,7 @@ fn pack_nup(args: &[String], o: &Options) -> Result<(), Box<dyn std::error::Erro
         ..WriterOptions::default()
     };
     let nup_options = import::NupOptions {
+        mapping: o.nup_mapping.clone(),
         platform: Some(platform),
         skip_addons: o.skip_dlc,
         progress: options.progress.clone(),
@@ -868,7 +882,7 @@ fn pack_nup(args: &[String], o: &Options) -> Result<(), Box<dyn std::error::Erro
     // and what the NUP profile presumes, kept next to the archive.
     let manifest_path = format!("{}.nximport", output.display());
     let notes_path = format!("{}.assumptions.txt", output.display());
-    let notes = format!("NUP profile v1 (a55uka/nup SPEC 1.0-draft), not native verification.\n\
+    let mut notes = format!("NUP profile v1 (a55uka/nup SPEC 1.0-draft), not native verification.\n\
 OBSERVED: TOC SHA-256, every file size and SHA-256, NPDM/NSO structure and Build IDs.\n\
 DECLARED: platform {platform:?} (from --platform).\n\
 PRESUMED: application ID = base title ID; an update package carries the application ID or its patch ID (+800).\n\
@@ -877,8 +891,18 @@ PRESUMED: update tree = base RomFS shadowed by the update paths; the update ExeF
 PRESUMED: a standalone_update package is complete.\n\
 PRESUMED: control.nacp and icons from the package meta TLVs are the native ones.\n\
 If any assumption is wrong, extract the NUP and use an explicit manifest with pack-tree.\n");
+    if o.nup_mapping.is_some() {
+        notes = "Explicit TOC-bound NUP compatibility mapping, not NUP v1 conformance.\nApplication, platform, roles, versions and completeness are declarations checked against available NPDM/CNMT.\nOriginal labels and declarations are preserved in each snapshot at data/__nup_mapping__.txt.\nExtra roots are preserved under data/__nup_root__/. Gameplay is untested.\n".into();
+    }
     if o.no_trail {
-        eprintln!("PRESUMED NUP profile (no review files: --no-trail)");
+        eprintln!(
+            "{} (no review files: --no-trail)",
+            if o.nup_mapping.is_some() {
+                "EXPLICIT NUP compatibility mapping"
+            } else {
+                "PRESUMED NUP profile"
+            }
+        );
     } else {
         for (path, bytes) in [
             (&manifest_path, stage.manifest.bytes()),
@@ -888,7 +912,14 @@ If any assumption is wrong, extract the NUP and use an explicit manifest with pa
             file.write_all(bytes)?;
             file.sync_all()?;
         }
-        eprintln!("PRESUMED NUP profile: review {notes_path}; declarations: {manifest_path}");
+        eprintln!(
+            "{}: review {notes_path}; declarations: {manifest_path}",
+            if o.nup_mapping.is_some() {
+                "EXPLICIT NUP compatibility mapping"
+            } else {
+                "PRESUMED NUP profile"
+            }
+        );
     }
     limits = import::ImportLimits::default();
     let mut measured = walk(&stage.package(), NODE_CEILING)?;
@@ -2291,6 +2322,14 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 "--omit-firmware requires --no-recipe to skip exact source reconstruction".into(),
             );
         }
+    }
+    if o.nup_mapping.is_some()
+        && !matches!(
+            args.first().map(String::as_str),
+            Some("pack-nup" | "check-nup")
+        )
+    {
+        return Err("--nup-map applies to pack-nup/check-nup only".into());
     }
     let mut limits = import::ImportLimits::default();
     let mut options = WriterOptions::default();

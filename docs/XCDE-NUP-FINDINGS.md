@@ -2,6 +2,18 @@
 
 Recorded 2026-11-14 from the user's `XCDE_NUP_Troubleshooting_Handoff.txt`, a summary of testing with another agent. This is a research note for future importer work, not a successful-conversion report or a request to modify game files. Original uploads and the original NUP are not included in this repository.
 
+**Follow-up:** the original NUP and original-path NPDMs were subsequently inspected
+in this fork. The primary NPDM uses `0100FF500E34A000` / ACID-2048 and the auxiliary
+uses `0400FF500E34A001` / ACID-3072. The container's two BASE-v0 labels conflict with
+its embedded Patch CNMT (application `0100FF500E34A000`, version 262144, Switch2,
+Program offsets 0 and 1); its separate DLC CNMT agrees with the reported title.
+The explicit [compatibility mapping](NUP-COMPATIBILITY.md) retains those original
+labels as provenance while declaring both program views as complete standalone
+updates, with their distinct native IDs and roles. This does not prove the
+completeness declaration or gameplay. Current conversion evidence is recorded in
+[TESTING.md](../TESTING.md); the remaining sections preserve the earlier handoff's
+scope and uncertainty.
+
 ## Outcome and preferred workflow
 
 The user prefers a faithfully structured NUP that can be converted through the NXConvert GUI. An explicit extracted-tree manifest was proposed as an alternative, but no conversion output, verification output, exit code, or emulator launch result was supplied. **Neither successful conversion nor successful verification was established. No corrected, working NUP was produced.**

@@ -82,12 +82,18 @@ fn add(flat: &mut Flat, name: &str, nodes: &[Node]) -> u32 {
 
 /// Minimal NUP v1 writer; `zstd` picks the codec for every non-empty file.
 pub fn build(packages: &[Pkg], zstd: bool) -> Vec<u8> {
+    build_with_extras(packages, zstd, &[])
+}
+
+/// Noncanonical root trees for explicit compatibility tests; ordinary v1
+/// fixtures still use `build` and contain no extra roots.
+pub fn build_with_extras(packages: &[Pkg], zstd: bool, extras: &[(usize, Vec<Node>)]) -> Vec<u8> {
     let mut flat = Flat {
         dirs: Vec::new(),
         files: Vec::new(),
     };
     let mut records = Vec::new();
-    for p in packages {
+    for (index, p) in packages.iter().enumerate() {
         let root = add(&mut flat, "", &[]);
         let mut kids = Vec::new();
         let (mut ex, mut ro) = (NONE, NONE);
@@ -101,6 +107,17 @@ pub fn build(packages: &[Pkg], zstd: bool) -> Vec<u8> {
         if let Some(r) = &p.romfs {
             ro = add(&mut flat, "romfs", r);
             kids.push(ro);
+        }
+        for (_, nodes) in extras.iter().filter(|(i, _)| *i == index) {
+            for node in nodes {
+                match node {
+                    Node::Dir(name, children) => kids.push(add(&mut flat, name, children)),
+                    Node::File(name, data) => {
+                        flat.files.push((name.to_string(), data.clone()));
+                        kids.push(FILE_FLAG | (flat.files.len() as u32 - 1));
+                    }
+                }
+            }
         }
         flat.dirs[root as usize].1 = kids;
         records.push((root, ex, ro));

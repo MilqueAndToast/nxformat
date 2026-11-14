@@ -296,13 +296,23 @@ fn is_nup(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("nup"))
 }
 
-fn nup(path: PathBuf, token: &CancellationToken) -> Source {
+pub(super) fn nup(path: PathBuf, mapping: Option<PathBuf>, token: &CancellationToken) -> Source {
     let mut source = Source {
         kind: SourceKind::Nup,
         path,
         ..Default::default()
     };
-    match import::inspect_nup(&source.path, &import::ImportLimits::for_nup(), token) {
+    let inspected = match &mapping {
+        Some(m) => import::inspect_nup_with_mapping(
+            &source.path,
+            m,
+            &import::ImportLimits::for_nup(),
+            token,
+        ),
+        None => import::inspect_nup(&source.path, &import::ImportLimits::for_nup(), token),
+    };
+    source.nup_mapping = mapping;
+    match inspected {
         Ok(info) => {
             source.size = info.size;
             source.supported = true;
@@ -426,7 +436,7 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
         if token.is_cancelled() {
             return Err("Cancelled".into());
         }
-        result.push(nup(path, token));
+        result.push(nup(path, None, token));
     }
     if !packages.is_empty() {
         let inventory = native::inventory(&packages, &options).map_err(|e| e.to_string())?;
