@@ -1,5 +1,7 @@
 # Local-decryption validation
 
+For user-reported XCDE/NUP multi-program investigation findings and their verification limits, see [XCDE NUP findings](docs/XCDE-NUP-FINDINGS.md). That investigation is separate from the passing automated and conversion tests below.
+
 Validated on Windows x64 with Rust 1.95.0, using the owner's existing local key files and game dumps. No key values or game data are in the source or Windows distribution.
 
 | Check | Result |
