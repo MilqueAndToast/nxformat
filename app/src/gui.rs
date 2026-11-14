@@ -181,8 +181,29 @@ fn start(mut job: Job, ctx: &egui::Context) -> Running {
             repaint.request_repaint();
         });
         let result = if purpose == Purpose::Scan
-            && args.first().is_some_and(|a| a == "scan-nup-map")
+            && args.first().is_some_and(|a| a == "generate-nup-map")
         {
+            cli::run(
+                vec![
+                    "map-nup".into(),
+                    args[1].clone(),
+                    args[2].clone(),
+                    "--assume-complete".into(),
+                ],
+                Some(sink),
+                Some(token.clone()),
+            )
+            .map_err(|e| e.to_string())
+            .map(|_| {
+                let mut source = discovery::nup(
+                    PathBuf::from(&args[1]),
+                    Some(PathBuf::from(&args[2])),
+                    &token,
+                );
+                source.nup_mapping_request = true;
+                let _ = tx.send(Message::Sources(vec![source]));
+            })
+        } else if purpose == Purpose::Scan && args.first().is_some_and(|a| a == "scan-nup-map") {
             let mut source = discovery::nup(
                 PathBuf::from(&args[1]),
                 args.get(2).map(PathBuf::from),
@@ -681,6 +702,88 @@ mod tests {
     }
 
     #[test]
+    fn nup_mapping_generation_job_loads_generated_mapping() {
+        use super::egui;
+        use nxformat_packer::import::synthetic_nup::{base, build_with_extras, Node};
+        let app_id = 0x0100_0000_5678_0000u64;
+        let auxiliary = 0x0400_0000_5678_0001u64;
+        let dir =
+            std::env::temp_dir().join(format!("nxconvert-generate-map-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("game.nup");
+        let mapping = dir.join("game.nxnupmap");
+        let _ = std::fs::remove_file(&mapping);
+        let mut cnmt = vec![0u8; 0x30 + 2 * 0x38];
+        cnmt[..8].copy_from_slice(&app_id.to_le_bytes());
+        cnmt[0xc] = 0x80;
+        cnmt[0xd] = 1;
+        cnmt[0xe] = 0x10;
+        cnmt[0x10] = 2;
+        for i in 0..2 {
+            cnmt[0x30 + i * 0x38 + 0x36] = 1;
+            cnmt[0x30 + i * 0x38 + 0x37] = i as u8;
+        }
+        let bytes = build_with_extras(
+            &[base(auxiliary), base(app_id)],
+            true,
+            &[(
+                1,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File("Application.cnmt", cnmt)],
+                )],
+            )],
+        );
+        std::fs::write(&path, &bytes).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::default();
+        let job = || super::Job {
+            label: "Generating NUP mapping".into(),
+            args: vec![
+                "generate-nup-map".into(),
+                super::text(&path),
+                super::text(&mapping),
+            ],
+            purpose: super::Purpose::Scan,
+            display: None,
+            metadata: None,
+            source_bytes: None,
+        };
+        for expected_success in [true, false] {
+            let running = super::start(job(), &ctx);
+            loop {
+                match running
+                    .rx
+                    .recv_timeout(std::time::Duration::from_secs(20))
+                    .unwrap()
+                {
+                    super::Message::Sources(sources) => {
+                        assert!(expected_success);
+                        app.add_scanned_sources(sources, &ctx);
+                    }
+                    super::Message::Done(result) => {
+                        assert_eq!(result.is_ok(), expected_success);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(app.sources[0].supported);
+        assert_eq!(app.sources[0].nup_mapping.as_ref(), Some(&mapping));
+        assert_eq!(app.sources[0].contents.len(), 2);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        nxformat_packer::cli::run(
+            job.args,
+            None,
+            Some(nxformat_packer::CancellationToken::default()),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn nup_discovery_uses_the_conversion_inventory_limits() {
         use super::{discovery, CancellationToken};
         use nxformat_packer::import::synthetic_nup::{base, build, Node};
@@ -872,6 +975,7 @@ struct App {
     crop_rx: Option<mpsc::Receiver<(String, EncodedArtwork)>>,
     last_output: Option<PathBuf>,
     remove_confirmation: Option<(String, Vec<String>)>,
+    mapping_confirmation: Option<PathBuf>,
     sources: Vec<Source>,
     output_dir: Option<PathBuf>,
     level: i32,
@@ -902,6 +1006,7 @@ impl Default for App {
             crop_rx: None,
             last_output: None,
             remove_confirmation: None,
+            mapping_confirmation: None,
             sources: Vec::new(),
             output_dir: None,
             level: 1,

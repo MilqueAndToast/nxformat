@@ -2,6 +2,9 @@
 //! Mapping declarations are not NUP v1 conformance or signature authentication.
 use super::*;
 use crate::{Platform, ProgramKind, SnapshotType};
+#[path = "generate.rs"]
+mod generate;
+pub use generate::generate_nup_mapping;
 
 pub(super) struct Mapping {
     pub manifest: DeclarationManifest,
@@ -123,6 +126,19 @@ impl Mapping {
         let mut text = String::new();
         file.take(limits.max_manifest_bytes + 1)
             .read_to_string(&mut text)?;
+        if text.len() as u64 > limits.max_manifest_bytes {
+            return Err(limit("NUP mapping exceeds manifest budget"));
+        }
+        Self::parse(&text, nup, toc, limits, token)
+    }
+
+    fn parse(
+        text: &str,
+        nup: &Path,
+        toc: &Toc,
+        limits: &ImportLimits,
+        token: &crate::CancellationToken,
+    ) -> Result<Self, WriterError> {
         if text.len() as u64 > limits.max_manifest_bytes {
             return Err(limit("NUP mapping exceeds manifest budget"));
         }

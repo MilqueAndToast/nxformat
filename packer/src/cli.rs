@@ -140,6 +140,7 @@ nxconvert inspect-tree PACKAGE MANIFEST KEY\n\
 nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2] [--tree-root RELATIVE_ROOT]... [--ignore-restore]\n\
 nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc] [--nup-map FILE]\n\
+nxconvert map-nup INPUT.nup OUTPUT.nxnupmap --assume-complete (generate a checked compatibility mapping)\n\
 nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] [--nup-map FILE] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
 nxconvert pack SOURCE... OUTPUT.nx [--keys prod.keys] [--title-keys title.keys] [--no-recipe [--omit-firmware]]\n\
 --keys enables streaming NSP/XCI decryption; adjacent title.keys is loaded automatically. Recipes default OFF with keys; --recipe rebuilds decrypted bytes, not encrypted originals.\n\
@@ -187,6 +188,7 @@ struct Options {
     paranoid: bool,
     skip_dlc: bool,
     nup_mapping: Option<PathBuf>,
+    assume_complete: bool,
     /// `--recipe` / `--no-recipe`; pack and add keep recipes unless told not to.
     recipe: Option<bool>,
     omit_firmware: bool,
@@ -214,6 +216,10 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
         }
         if a == "--latest" {
             o.latest = true;
+            continue;
+        }
+        if a == "--assume-complete" {
+            o.assume_complete = true;
             continue;
         }
         if a == "--paranoid" {
@@ -2330,6 +2336,33 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         )
     {
         return Err("--nup-map applies to pack-nup/check-nup only".into());
+    }
+    if o.assume_complete && args.first().map(String::as_str) != Some("map-nup") {
+        return Err("--assume-complete applies to map-nup only".into());
+    }
+    if args.first().map(String::as_str) == Some("map-nup") {
+        if args.len() != 3 || !o.assume_complete {
+            return Err("map-nup INPUT.nup OUTPUT.nxnupmap requires --assume-complete: metadata cannot prove stored program views are complete".into());
+        }
+        let mapping = import::generate_nup_mapping(
+            Path::new(&args[1]),
+            &import::ImportLimits::for_nup(),
+            &command_token(&o),
+        )?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&args[2])?;
+        if let Err(error) = output
+            .write_all(mapping.as_bytes())
+            .and_then(|_| output.sync_all())
+        {
+            drop(output);
+            let _ = std::fs::remove_file(&args[2]);
+            return Err(error.into());
+        }
+        println!("Generated TOC-bound mapping: {}. Program index zero is primary; other indices are auxiliary. Completeness is caller-declared; gameplay is untested. Review before conversion.", args[2]);
+        return Ok(());
     }
     let mut limits = import::ImportLimits::default();
     let mut options = WriterOptions::default();

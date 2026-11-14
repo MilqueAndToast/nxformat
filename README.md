@@ -44,7 +44,7 @@ Fork of [fab918/nxformat](https://github.com/fab918/nxformat). Credit to its aut
 
 - **Local decryption:** load `prod.keys` and optional `title.keys` in the GUI or CLI to convert supported encrypted NSP/XCI files directly, with matching updates and DLC.
 - **Sparse NCA3:** stream mapped content and generate missing regions as zeros, without a full decrypted temporary package. Missing game data still requires its matching update.
-- **Multi-program NUP (source build):** explicitly load a TOC-bound mapping in the GUI or CLI to retain native primary/auxiliary programs, matching updates and separate DLC. [Usage and limits](docs/NUP-COMPATIBILITY.md).
+- **Multi-program NUP (source build):** generate or load a TOC-bound mapping in the GUI or CLI to retain native primary/auxiliary programs, matching updates and separate DLC. Generation requires consistent embedded metadata. [Usage and limits](docs/NUP-COMPATIBILITY.md).
 
 Originals remain intact. With decryption enabled, recipes default off; enabled recipes rebuild decrypted bytes. [Usage and key requirements](LOCAL-DECRYPTION.md).
 

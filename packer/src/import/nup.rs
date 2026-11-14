@@ -23,7 +23,7 @@ use crate::hash::Sha256;
 use crate::native::NACP_LANGUAGE_MAP;
 use crate::WriterOptions;
 mod compatibility;
-pub use compatibility::inspect_nup_with_mapping;
+pub use compatibility::{generate_nup_mapping, inspect_nup_with_mapping};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},

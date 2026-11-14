@@ -2,6 +2,33 @@
 
 ## Multi-program NUP compatibility — 2026-11-14
 
+### Mapping generation follow-up
+
+`map-nup --assume-complete` and GUI **Generate NUP mapping…** now derive a
+TOC-bound declaration from embedded NPDM/CNMT. The full packer suite passed
+270 tests (one intentionally ignored), and all 13 GUI tests passed. Added coverage checks generated mixed
+profiles, roles, per-program update dependencies and DLC through conversion,
+strict verification and source comparison; explicit completeness opt-in;
+no overwrite; missing/ambiguous/conflicting metadata; cancellation; size limits;
+and unique, ambiguous or malformed controls. GUI generation-job coverage checks
+automatic loading, conversion and rejection of an existing output file.
+
+Real XCDE mapping generation and validation passed, preserving the manual
+mapping's application/platform/program/profile/version relationships. With
+multiple edition controls present, generation intentionally leaves display
+selection to package metadata; it does not reproduce the manual artwork choice.
+The generated mapping was not used for another full real-game conversion;
+the manual mapping's conversion evidence below remains separate.
+
+Real XC2 generation was rejected for conflicting CNMT application/platform
+pairs (`0100E95004038000` / Switch1 and `0100E95004039862` / Switch2). Real XCX
+generation was rejected for both Switch1 and Switch2 CNMT markers under
+`0100453019AA8000`. Neither container was altered or declared corrupt. These
+conflicts need separate investigation and cannot be overridden by this mapping
+workflow. No gameplay validation or manual native file-picker test was performed.
+
+### Initial explicit mapping implementation
+
 The explicit [NUP mapping](docs/NUP-COMPATIBILITY.md) was checked on Windows x64:
 
 - Packer regression suite: 267 passed, one intentionally ignored; doctest run passed (no doctests). The Windows junction fixture ran outside the restricted sandbox.

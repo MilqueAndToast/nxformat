@@ -347,7 +347,8 @@ impl App {
                                 });
                             }
                             if source.kind == SourceKind::Nup {
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.add_enabled(mapping_enabled, egui::Button::new("Generate NUP mapping…")).clicked() { self.mapping_confirmation = Some(source.path.clone()); }
                                     if ui.add_enabled(mapping_enabled, egui::Button::new("Load NUP mapping…")).clicked() {
                                         if let Some(path)=rfd::FileDialog::new().add_filter("NUP mapping", &["nxnupmap"]).pick_file() {
                                             mapping_request=Some((source.path.clone(),Some(path)));
@@ -415,6 +416,7 @@ impl App {
                 for source in self.sources.iter().filter(|s| s.contents.is_empty()) {
                     theme::card().show(ui, |ui| {
                         ui.strong(file_name(&source.path));
+                        if source.kind == SourceKind::Nup && ui.add_enabled(mapping_enabled, egui::Button::new("Generate NUP mapping…")).clicked() { self.mapping_confirmation = Some(source.path.clone()); }
                         if source.kind == SourceKind::Nup && ui.add_enabled(mapping_enabled,egui::Button::new("Load NUP mapping…")).clicked() {
                             if let Some(path)=rfd::FileDialog::new().add_filter("NUP mapping", &["nxnupmap"]).pick_file() {mapping_request=Some((source.path.clone(),Some(path)));}
                         }
@@ -1085,6 +1087,23 @@ impl eframe::App for App {
                             self.edit(label,args);
                         }
                     });
+            });
+        }
+        if let Some(source) = self.mapping_confirmation.clone() {
+            egui::Modal::new(egui::Id::unique("generate-nup-map")).show(&ctx, |ui| {
+                ui.set_width(400.0);
+                ui.heading("Generate NUP mapping");
+                ui.label("Use embedded metadata to identify programs and DLC. Program index 0 is treated as primary. Missing or conflicting relationships will stop generation.");
+                ui.label("Generating declares that the stored program trees are complete. Metadata cannot prove this or guarantee the game will boot. Your source stays unchanged.");
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() { self.mapping_confirmation = None; }
+                    if ui.button("Assume complete and generate…").clicked() {
+                        self.mapping_confirmation = None;
+                        if let Some(path) = rfd::FileDialog::new().add_filter("NUP mapping", &["nxnupmap"]).set_file_name(source.with_extension("nxnupmap").file_name().unwrap().to_string_lossy()).save_file() {
+                            self.push("Generating NUP mapping", vec!["generate-nup-map".into(), text(&source), text(&path)], Purpose::Scan);
+                        }
+                    }
+                });
             });
         }
         let hovered = ctx.input(|i| !i.raw.hovered_files.is_empty());

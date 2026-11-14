@@ -14,6 +14,7 @@ nxconvert scan SOURCE|FOLDER...
 nxconvert pack SOURCE... OUTPUT.nx [--no-recipe [--omit-firmware]]
 nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2]
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--nup-map FILE]
+nxconvert map-nup INPUT.nup OUTPUT.nxnupmap --assume-complete
 nxconvert contents ARCHIVE.nx
 nxconvert add ARCHIVE.nx SOURCE... [--no-recipe [--omit-firmware]]
 nxconvert add-tree ARCHIVE.nx PACKAGE [--platform switch1|switch2] [--update-version N]

@@ -21,9 +21,9 @@ pub use manifest::{
     addon_belongs_to, Composition, DeclarationManifest, ManifestSelection, SnapshotDeclaration,
 };
 pub use nup::{
-    check_nup, check_nup_with_mapping, convert_nup, inspect_nup, inspect_nup_with_mapping,
-    stage_nup, stage_nup_with_options, NupCheck, NupConversionStats, NupInfo, NupOptions,
-    NupPackageInfo, NupStage, SkippedAddon,
+    check_nup, check_nup_with_mapping, convert_nup, generate_nup_mapping, inspect_nup,
+    inspect_nup_with_mapping, stage_nup, stage_nup_with_options, NupCheck, NupConversionStats,
+    NupInfo, NupOptions, NupPackageInfo, NupStage, SkippedAddon,
 };
 use std::path::PathBuf;
 pub use tree::{

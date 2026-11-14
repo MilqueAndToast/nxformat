@@ -339,3 +339,216 @@ fn mapped_stream_still_rejects_corrupt_source_payloads() {
     .is_err());
     assert!(!output.exists());
 }
+
+fn generation_fixture(ambiguous: bool) -> Vec<u8> {
+    fn meta(kind: u8, title: u64, version: u32, offsets: &[u8]) -> Vec<u8> {
+        let ext = if kind == 0x81 { 0x18 } else { 0x10 };
+        let mut b = vec![0; 0x20 + ext + offsets.len() * 0x38];
+        b[..8].copy_from_slice(&title.to_le_bytes());
+        b[8..12].copy_from_slice(&version.to_le_bytes());
+        b[0xc] = kind;
+        b[0xd] = 1;
+        b[0xe] = ext as u8;
+        b[0x10..0x12].copy_from_slice(&(offsets.len() as u16).to_le_bytes());
+        if kind != 0x80 {
+            b[0x20..0x28].copy_from_slice(&APP.to_le_bytes());
+        }
+        for (i, offset) in offsets.iter().enumerate() {
+            b[0x20 + ext + i * 0x38 + 0x36] = 1;
+            b[0x20 + ext + i * 0x38 + 0x37] = *offset;
+        }
+        b
+    }
+    let mut primary = base(APP);
+    for n in primary.exefs.iter_mut().flatten() {
+        if let Node::File("main.npdm", b) = n {
+            *b = npdm(APP, NpdmProfile::MetaAcid2048V1);
+        }
+    }
+    let mut main_update = update(APP, 7, 0);
+    for n in main_update.exefs.iter_mut().flatten() {
+        if let Node::File("main.npdm", b) = n {
+            *b = npdm(APP, NpdmProfile::MetaAcid2048V1);
+        }
+    }
+    let mut extras = Vec::new();
+    for i in 0..5 {
+        if ambiguous && i == 0 {
+            continue;
+        }
+        let bytes = match i {
+            0 | 1 => meta(0x80, APP, 0, &[0, 1]),
+            2 => meta(0x82, APP + 0x1001, 0, &[]),
+            _ => meta(0x81, APP + 0x800, 7, &[0, 1]),
+        };
+        extras.push((
+            i,
+            vec![Node::Dir("meta", vec![Node::File("content.cnmt", bytes)])],
+        ));
+    }
+    build_with_extras(
+        &[
+            base(AUX),
+            primary,
+            addon(APP),
+            update(AUX, 7, 0),
+            main_update,
+        ],
+        true,
+        &extras,
+    )
+}
+
+#[test]
+fn generated_mapping_preserves_programs_updates_dlc_and_converts() {
+    let dir = work("generated");
+    let input = dir.join("source.nup");
+    let mapping = dir.join("generated.nxnupmap");
+    let output = dir.join("generated.nx");
+    let bytes = generation_fixture(false);
+    fs::write(&input, &bytes).unwrap();
+    let limits = ImportLimits::default();
+    let token = crate::CancellationToken::default();
+    let text = generate_nup_mapping(&input, &limits, &token).unwrap();
+    assert!(text.contains("primary\tbase\t0"));
+    assert!(text.contains("auxiliary\tupdate\t7"));
+    assert!(text.contains("dependency\tpkg-3\trequired-base\tpkg-0"));
+    assert!(text.contains("dependency\tpkg-4\trequired-base\tpkg-1"));
+    let args = vec![
+        "map-nup".into(),
+        input.to_string_lossy().into_owned(),
+        mapping.to_string_lossy().into_owned(),
+    ];
+    assert!(crate::cli::run(args.clone(), None, None).is_err());
+    assert!(!mapping.exists());
+    let mut args = args;
+    args.push("--assume-complete".into());
+    crate::cli::run(args.clone(), None, None).unwrap();
+    assert_eq!(fs::read_to_string(&mapping).unwrap(), text);
+    assert!(crate::cli::run(args, None, None).is_err());
+    assert_eq!(fs::read_to_string(&mapping).unwrap(), text);
+    convert_nup(
+        &input,
+        &output,
+        &NupOptions {
+            mapping: Some(mapping.clone()),
+            platform: Some(Platform::Switch2),
+            stream: true,
+            ..Default::default()
+        },
+        &limits,
+        &WriterOptions::default(),
+    )
+    .unwrap();
+    let summary = crate::inspect_archive(
+        &output,
+        &WriterOptions::default(),
+        crate::IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    assert_eq!(summary.applications[0].programs.len(), 2);
+    assert_eq!(summary.applications[0].snapshots.len(), 5);
+    assert_eq!(
+        check_nup_with_mapping(
+            &input,
+            &output,
+            false,
+            &mapping,
+            &limits,
+            &WriterOptions::default()
+        )
+        .unwrap()
+        .snapshots,
+        5
+    );
+    assert_eq!(fs::read(&input).unwrap(), bytes);
+}
+
+#[test]
+fn generation_rejects_missing_ambiguous_cancelled_and_over_budget() {
+    let dir = work("generation-reject");
+    let input = dir.join("source.nup");
+    let token = crate::CancellationToken::default();
+    let limits = ImportLimits::default();
+    let mut conflicting = cnmt();
+    conflicting[0xd] = 0;
+    let conflict = build_with_extras(
+        &[base(AUX), base(APP)],
+        true,
+        &[
+            (
+                0,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File("Application.cnmt", conflicting)],
+                )],
+            ),
+            (
+                1,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File("Application.cnmt", cnmt())],
+                )],
+            ),
+        ],
+    );
+    for bytes in [fixture(), generation_fixture(true), conflict] {
+        fs::write(&input, bytes).unwrap();
+        assert!(generate_nup_mapping(&input, &limits, &token).is_err());
+    }
+    fs::write(&input, generation_fixture(false)).unwrap();
+    let mut small = limits.clone();
+    small.max_manifest_bytes = 64;
+    assert!(generate_nup_mapping(&input, &small, &token).is_err());
+    token.cancel();
+    assert!(generate_nup_mapping(&input, &limits, &token).is_err());
+}
+
+#[test]
+fn generation_selects_only_unambiguous_valid_control_metadata() {
+    let dir = work("generation-control");
+    let input = dir.join("source.nup");
+    for case in 0..3 {
+        let mut control = vec![Node::File(
+            "control.nacp",
+            if case == 2 {
+                vec![0; 8]
+            } else {
+                nacp(&[(0, "Generated title")])
+            },
+        )];
+        if case == 1 {
+            control.push(Node::Dir(
+                "other",
+                vec![Node::File("control.nacp", nacp(&[(0, "Other edition")]))],
+            ));
+        }
+        let bytes = build_with_extras(
+            &[base(AUX), base(APP)],
+            true,
+            &[(
+                1,
+                vec![
+                    Node::Dir("meta", vec![Node::File("Application.cnmt", cnmt())]),
+                    Node::Dir("control", control),
+                ],
+            )],
+        );
+        fs::write(&input, bytes).unwrap();
+        let generated = generate_nup_mapping(
+            &input,
+            &ImportLimits::default(),
+            &crate::CancellationToken::default(),
+        );
+        if case == 2 {
+            assert!(generated.is_err());
+        } else {
+            assert_eq!(
+                generated
+                    .unwrap()
+                    .contains("nacp\tpkg-1\tcontrol/control.nacp"),
+                case == 0
+            );
+        }
+    }
+}

@@ -49,3 +49,19 @@ tested. No new release was published or existing release asset replaced.
 
 Private evidence and the reviewed XCDE mapping: `results/multi-program-nup/`.
 Local Windows package: `dist-release/NXConvert-Local-Decryption-Windows-x64.zip`.
+
+### Mapping generation follow-up
+
+Added GUI **Generate NUP mapping…** and CLI `map-nup --assume-complete`.
+Generation derives relationships from embedded NPDM/CNMT, validates the complete
+mapping before saving, refuses existing output paths, and loads successful GUI
+results automatically. Index-zero primary assignment and materialization
+completeness are disclosed assumptions. Missing/ambiguous metadata and conflicting
+applications/platforms are rejected; edition-specific controls are not guessed.
+The source NUP stays read-only.
+
+The packer suite passed 270 tests (one ignored) and all 13 GUI tests passed, including generation through
+conversion/source verification and refusal cases. Real XCDE generation passed;
+XC2/XCX generation correctly refused conflicting CNMT relationships. Real generated
+mapping conversion and gameplay were not tested; earlier manual-mapping evidence
+remains separate. See [TESTING.md](TESTING.md) for exact scope.

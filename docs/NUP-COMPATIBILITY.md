@@ -8,18 +8,36 @@ This is a source-build feature; the existing 1.0.2.2 release does not include it
 
 ## Use
 
-In the GUI, add the NUP and choose **Load NUP mapping…** on its source card
-(including a rejected source). Select a reviewed `.nxnupmap` file, then convert.
+In the GUI, add the NUP and choose **Generate NUP mapping…** on its source card
+(including a rejected source). Read the completeness assumption, choose
+**Assume complete and generate…**, and save a new `.nxnupmap` file. A successful
+mapping is loaded automatically; then convert. **Load NUP mapping…** selects an
+existing reviewed mapping instead.
 **Remove mapping** restores strict discovery. Generic rescans retain an active
 mapping; adjacent sidecars are never loaded automatically. Conversion rechecks
 the selected file and source rather than trusting discovery results.
 
 ```text
+nxconvert map-nup game.nup game.nxnupmap --assume-complete
 nxconvert pack-nup game.nup game.nx --platform switch2 --nup-map game.nxnupmap
 nxconvert verify game.nx
 nxconvert check-nup game.nup game.nx --nup-map game.nxnupmap
 nxconvert extract game.nx extracted --no-restore
 ```
+
+Generation reads embedded NPDM and `meta/*.cnmt` without decrypting or rewriting
+the NUP. It requires one consistent application/platform and an unambiguous
+CNMT relationship for each package. A package's own CNMT takes precedence;
+otherwise a unique matching sibling CNMT is required. Native program index zero
+is assigned the primary role; other indices are auxiliary. Matching earlier
+bases become update dependencies; a Patch without a matching base is declared
+standalone. These conventions and completeness remain explicit assumptions.
+
+Missing/conflicting metadata stops generation with an error. Existing output
+files are never overwritten. A unique control NACP is selected automatically;
+multiple edition controls are preserved but not guessed between (display falls
+back to package metadata). Generation validates the mapping before saving it.
+This does not repair conflicting CNMTs or establish game completeness.
 
 ## Mapping format and checks
 
