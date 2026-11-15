@@ -65,3 +65,7 @@ conversion/source verification and refusal cases. Real XCDE generation passed;
 XC2/XCX generation correctly refused conflicting CNMT relationships. Real generated
 mapping conversion and gameplay were not tested; earlier manual-mapping evidence
 remains separate. See [TESTING.md](TESTING.md) for exact scope.
+
+## Release 1.0.3.1 — 2026-11-14
+
+Full release of the upstream 1.0.3 merge, multi-program NUP compatibility, and checked GUI/CLI mapping generation. Includes the verified implementation through `fc9bc2c`. Latest validation: 270 packer tests and 13 GUI tests passed (one intentionally ignored packer test); the packaged CLI generated the XCDE mapping. The preceding compatibility implementation verified all 37,718 XCDE source files after conversion. No additional full real conversion or gameplay claim is made for the generation change.
