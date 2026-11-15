@@ -142,5 +142,9 @@ reject. Native raw-content behavior is unchanged. No NX wire-format change.
 
 Paranoid source comparison now reopens streamed NUP files through the same
 checked reader; raw/Zstd and mapped DataPatch regressions cover this path.
-285 packer tests passed (one ignored), plus 16 GUI tests; see TESTING.md. These
-changes remain local pending real-source validation and PM publication review.
+285 packer tests passed (one ignored), plus 16 GUI tests; see TESTING.md. A real
+materialized NUP passed paranoid conversion, strict verification and all 41,676
+source-file comparisons. Readback confirmed the native launch ID, all eight
+DLC/native minimums and unresolved provenance in all nine snapshots, without
+fabricated dependencies. Packaged CLI checks passed. Runtime compatibility is
+unverified. These changes remain local pending PM publication review.

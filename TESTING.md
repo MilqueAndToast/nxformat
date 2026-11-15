@@ -23,7 +23,21 @@ SHA-256-checked reader; both ordinary and mapped DataPatch conversion paths are
 covered. A real validation run exposed the former writer-only reader error;
 failure published no final archive before this correction.
 
-## DataPatch support — 2026-11-15
+A real 30,973,597,620-byte NUP then converted to a 28,438,890,116-byte NX with
+paranoid source comparison enabled. Strict archive verification passed. The
+independent mapped check passed for all 41,676 original files across nine
+snapshots, reading back 41,530 distinct NX files (31,057,834,386 bytes) and checking
+the selected NACP. Original metadata/control files and compatibility provenance
+were included. A separate metadata readback confirmed one unchanged nonzero
+native launch Program, eight DLC snapshots, all eight original CNMT minimums,
+structured unresolved rows in all nine snapshots and no fabricated dependencies.
+The original was opened read-only; size, modification time and validated TOC
+digest remained unchanged. Packaged Windows CLI warning/opt-in, mapping parity
+and real-NX contents checks passed. Runtime compatibility remains unresolved;
+no gameplay, real native NSP/XCI DataPatch conversion or new manual UI validation
+is claimed.
+
+## DataPatch support — initial 1.0.3.3 validation, 2026-11-15
 
 Unreleased source adds the [documented complete-view subset](docs/DATAPATCH.md).
 The shared CNMT parser decodes target DataId, owning application, patch title,

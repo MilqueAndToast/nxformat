@@ -57,7 +57,7 @@ Originals remain intact. With decryption enabled, recipes default off; enabled r
 | NCA3 NSP/XCI, CTR and CTR-EX decryption | Tested with real game dumps |
 | Sparse NCA3 and skip-hash modes | Synthetic tests only; sparse base/update conversion, strict NX verification and recipe replay pass. Real sparse games remain untested |
 | Explicit multi-program NUP mapping | Synthetic cases and real multi-program conversions, strict verification and source-file comparison passed; gameplay untested |
-| Complete DataPatch DLC updates | Synthetic materialized/native conversion, decryption, extraction and recipe/restoration checks; real conversions untested |
+| Complete DataPatch DLC updates | Real materialized NUP conversion, strict verification and full source comparison pass in source builds; native conversion/decryption remains synthetic-tested. Gameplay untested |
 | Encrypted Switch 2, NCA0/NCA2, XTS content sections, NCZ/NSZ/XCZ | Unsupported |
 | Emulator gameplay; this fork on Linux/macOS | Untested |
 

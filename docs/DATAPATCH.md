@@ -48,5 +48,7 @@ retain their requirements in CNMT and report the absent application.
 
 Synthetic tests cover materialized and native conversion, minimum-version
 dependencies, mixed Program profiles, encryption, strict verification, extraction,
-exact NX restoration and package recipe replay. No real DataPatch conversion or
-gameplay validation is claimed. See [TESTING.md](../TESTING.md).
+exact NX restoration and package recipe replay. Source builds also passed real
+materialized NUP conversion, strict verification and complete source comparison,
+retaining unresolved application-version requirements. Native NSP/XCI DataPatch
+conversion remains synthetic-tested; gameplay is untested. See [TESTING.md](../TESTING.md).
