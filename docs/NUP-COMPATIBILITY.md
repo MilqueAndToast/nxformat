@@ -15,18 +15,27 @@ checks.
 
 ## Use
 
-In the GUI, add the NUP and choose **Generate NUP mapping…** on its source card
-(including a rejected source). A per-file preflight lists detected NUP-v1
-violations before anything is enabled. **Cancel** is the safe default. Choose
-**Continue in compatibility mode** only after reviewing the warning and
-completeness assumption, then save a new `.nxnupmap` file. A successful
-mapping is loaded automatically; then convert. **Load NUP mapping…** selects an
-existing reviewed mapping instead.
+In the GUI, add the NUP and choose **Generate NUP mapping** when its source card
+requires one, or **Generate NUP mappings for all** for the queue. Ordinary
+strict-valid NUPs convert directly, including those without CNMT metadata.
+Each affected file has its own warning and completeness review. **Cancel** is
+the safe default; **Continue for this file** applies only to that source.
+The batch continues after individual errors and reports generated, skipped,
+failed and cancelled counts. Unchanged valid mappings are reused.
+
+Successful generation shows **NUP mapping generated**. The app manages its
+temporary mapping for the session; there is no save dialog. Queued conversions
+retain it until their readers finish. Owned files are cleaned after conversion,
+removal, clear, failed conversion or normal exit; retry generates a fresh map.
+Cancelling a batch keeps earlier successful maps available for queued sources.
+**Load mapping (advanced)…** selects an existing reviewed mapping instead;
+imported mapping files and source NUPs are never deleted by session cleanup.
+The CLI below still supports explicitly saved mapping files.
 Existing mappings go through the same warning; their existence does not supply
 consent. If the source TOC changes after review, review it again. Acknowledgment
 lasts for the loaded source in this app session.
 **Remove mapping** restores strict discovery. Generic rescans retain an active
-mapping; adjacent sidecars are never loaded automatically. Conversion rechecks
+mapping for an unchanged source; adjacent sidecars are never loaded automatically. Conversion rechecks
 the selected file and source rather than trusting discovery results.
 
 ```text
@@ -96,9 +105,9 @@ programs cannot meet NX's one-primary requirement; numeric index alone does not
 determine that role.
 
 Generation errors appear on the affected source card with the reason and next
-step. This includes save failures, cancelled/unavailable save dialogs, invalid
-mapping loads and unexpected background-task termination. Existing mapping
-files are never overwritten; choose a new filename when saving again.
+step, including temporary-storage failures, invalid mapping loads and unexpected
+background-task termination. CLI mapping output files are never overwritten;
+choose a new filename when saving again.
 
 ## Mapping format and checks
 

@@ -311,6 +311,13 @@ pub(super) fn nup(path: PathBuf, mapping: Option<PathBuf>, token: &CancellationT
         ),
         None => import::inspect_nup(&source.path, &import::ImportLimits::for_nup(), token),
     };
+    let preflight = import::inspect_nup_spec(&source.path, &import::ImportLimits::for_nup(), token);
+    source.nup_toc = preflight.as_ref().ok().map(|p| p.toc_sha256);
+    source.nup_mapping_needed = if mapping.is_some() {
+        import::inspect_nup(&source.path, &import::ImportLimits::for_nup(), token).is_err()
+    } else {
+        inspected.is_err() && preflight.is_ok()
+    };
     source.nup_mapping = mapping;
     match inspected {
         Ok(info) => {

@@ -8,7 +8,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod artwork;
 mod discovery;
+mod mapping_dialog;
+mod outputs;
+mod session_mapping;
 mod theme;
+#[cfg(test)]
+mod workflow_tests;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use theme::{Icon, ACCENT, TEXT};
@@ -65,6 +70,9 @@ struct Source {
     ignore_restore: bool,
     nup_platform: Option<Platform>,
     nup_mapping: Option<PathBuf>,
+    nup_generated_mapping: Option<Arc<session_mapping::SessionMapping>>,
+    nup_mapping_needed: bool,
+    nup_toc: Option<[u8; 32]>,
     nup_mapping_request: bool,
     nup_mapping_feedback: Option<String>,
     nup_acknowledged_toc: Option<[u8; 32]>,
@@ -147,10 +155,13 @@ struct Job {
     display: Option<nxformat_packer::DisplayFallback>,
     metadata: Option<MetadataEdit>,
     source_bytes: Option<u64>,
+    mapping_resources: Vec<Arc<session_mapping::SessionMapping>>,
+    nup_reviewed_toc: Option<[u8; 32]>,
 }
 
 enum Message {
     MappingReview(MappingReview),
+    MappingSkipped,
     Sources(Vec<Source>),
     Metadata(Option<ArchiveMetadata>),
     Line(bool, String),
@@ -172,6 +183,21 @@ struct Running {
     done: u64,
     lines: Vec<String>,
     started: Instant,
+    mapping_skipped: bool,
+    worker: Option<WorkerGuard>,
+}
+
+struct WorkerGuard {
+    cancel: CancellationToken,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 fn start(mut job: Job, ctx: &egui::Context) -> Running {
@@ -182,8 +208,11 @@ fn start(mut job: Job, ctx: &egui::Context) -> Running {
     let purpose = job.purpose;
     let display = job.display.clone();
     let metadata = job.metadata.take();
+    let reviewed_toc = job.nup_reviewed_toc;
     let ctx = ctx.clone();
-    std::thread::spawn(move || {
+    let resources = job.mapping_resources.clone();
+    let worker = std::thread::spawn(move || {
+        let _resources = resources;
         let lines = tx.clone();
         let repaint = ctx.clone();
         let sink: cli::Sink = Arc::new(move |error, line: &str| {
@@ -191,52 +220,118 @@ fn start(mut job: Job, ctx: &egui::Context) -> Running {
             repaint.request_repaint();
         });
         let result = if purpose == Purpose::Scan
-            && args.first().is_some_and(|a| a == "review-nup-map")
+            && args
+                .first()
+                .is_some_and(|a| a == "review-nup-map" || a == "review-nup-auto")
         {
-            nxformat_packer::import::inspect_nup_spec(
-                Path::new(&args[1]),
-                &nxformat_packer::import::ImportLimits::for_nup(),
-                &token,
-            )
-            .map_err(|e| e.to_string())
-            .map(|preflight| {
+            (|| {
+                let automatic = args[0] == "review-nup-auto";
+                if automatic {
+                    let mut direct = discovery::nup(PathBuf::from(&args[1]), None, &token);
+                    if direct.supported {
+                        direct.nup_mapping_request = true;
+                        let _ = tx.send(Message::Sources(vec![direct]));
+                        let _ = tx.send(Message::MappingSkipped);
+                        return Ok(());
+                    }
+                }
+                let preflight = nxformat_packer::import::inspect_nup_spec(
+                    Path::new(&args[1]),
+                    &nxformat_packer::import::ImportLimits::for_nup(),
+                    &token,
+                )
+                .map_err(|e| e.to_string())?;
+                if automatic
+                    && args.get(2).is_some_and(|p| !p.is_empty())
+                    && args.get(3) == Some(&mapping_digest(&preflight.toc_sha256))
+                {
+                    let mut source = discovery::nup(
+                        PathBuf::from(&args[1]),
+                        Some(PathBuf::from(&args[2])),
+                        &token,
+                    );
+                    if source.supported && source.nup_toc == Some(preflight.toc_sha256) {
+                        source.nup_generated_mapping = _resources
+                            .iter()
+                            .find(|m| m.path == Path::new(&args[2]))
+                            .cloned();
+                        source.nup_acknowledged_toc = Some(preflight.toc_sha256);
+                        source.nup_mapping_request = true;
+                        let _ = tx.send(Message::Sources(vec![source]));
+                        let _ = tx.send(Message::MappingSkipped);
+                        return Ok(());
+                    }
+                }
+                if automatic && args.get(2).is_some_and(|p| !p.is_empty()) {
+                    let mut stale = discovery::nup(PathBuf::from(&args[1]), None, &token);
+                    stale.nup_mapping_request = true;
+                    stale.nup_mapping_feedback=Some("The previous mapping is no longer valid for this source. Review this file to generate a new mapping.".into());
+                    let _ = tx.send(Message::Sources(vec![stale]));
+                }
                 let _ = tx.send(Message::MappingReview(MappingReview {
                     source: PathBuf::from(&args[1]),
-                    mapping: args.get(2).map(PathBuf::from),
+                    mapping: if automatic {
+                        None
+                    } else {
+                        args.get(2).map(PathBuf::from)
+                    },
                     preflight,
                 }));
-            })
+                Ok(())
+            })()
         } else if purpose == Purpose::Scan && args.first().is_some_and(|a| a == "generate-nup-map")
         {
-            check_mapping_acknowledgment(&args, &token).and_then(|digest| {
-                let mut command = vec![
-                    "map-nup".into(),
-                    args[1].clone(),
-                    args[2].clone(),
-                    "--assume-complete".into(),
-                ];
-                if digest.is_some() {
-                    command.push("--allow-nonconforming-nup".into());
-                    command.push("--allow-unresolved-nup-requirements".into());
+            let owned = if args[2] == "@session" {
+                session_mapping::SessionMapping::create().map(Arc::new).map(Some).map_err(|e|format!("Cannot create temporary mapping storage: {e}. Check the temporary folder and retry."))
+            } else {
+                Ok(None)
+            };
+            owned.and_then(|owned| {
+                let mut args = args.clone();
+                if let Some(owned) = &owned {
+                    args[2] = text(&owned.path);
                 }
-                cli::run(command, Some(sink), Some(token.clone()))
-                    .map_err(|e| e.to_string())
-                    .and_then(|_| {
-                        let mut source = discovery::nup(
-                            PathBuf::from(&args[1]),
-                            Some(PathBuf::from(&args[2])),
-                            &token,
-                        );
-                        source.nup_mapping_request = true;
-                        source.nup_acknowledged_toc = digest;
-                        let result = if source.supported {
-                            Ok(())
-                        } else {
-                            Err(source.issue.clone())
-                        };
-                        let _ = tx.send(Message::Sources(vec![source]));
-                        result
-                    })
+                check_mapping_acknowledgment(&args, &token).and_then(|digest| {
+                    let mut command = vec![
+                        "map-nup".into(),
+                        args[1].clone(),
+                        args[2].clone(),
+                        "--assume-complete".into(),
+                    ];
+                    if digest.is_some() {
+                        command.push("--allow-nonconforming-nup".into());
+                        command.push("--allow-unresolved-nup-requirements".into());
+                    }
+                    cli::run(command, Some(sink), Some(token.clone()))
+                        .map_err(|e| e.to_string())
+                        .and_then(|_| {
+                            let mut source = discovery::nup(
+                                PathBuf::from(&args[1]),
+                                Some(PathBuf::from(&args[2])),
+                                &token,
+                            );
+                            if digest.is_some() && source.nup_toc!=digest {
+                                source.supported=false;source.selected=false;source.issue="The NUP changed while generating its mapping. Review the current source again before retrying.".into();
+                            }
+                            source.nup_mapping_request = true;
+                            source.nup_generated_mapping = if source.supported {
+                                owned.clone()
+                            } else {
+                                None
+                            };
+                            if owned.is_some() && !source.supported {
+                                source.nup_mapping = None;
+                            }
+                            source.nup_acknowledged_toc = digest;
+                            let result = if source.supported {
+                                Ok(())
+                            } else {
+                                Err(source.issue.clone())
+                            };
+                            let _ = tx.send(Message::Sources(vec![source]));
+                            result
+                        })
+                })
             })
         } else if purpose == Purpose::Scan && args.first().is_some_and(|a| a == "scan-nup-map") {
             check_mapping_acknowledgment(&args, &token).and_then(|digest| {
@@ -245,7 +340,14 @@ fn start(mut job: Job, ctx: &egui::Context) -> Running {
                     args.get(2).map(PathBuf::from),
                     &token,
                 );
+                if digest.is_some() && source.nup_toc!=digest {
+                    source.supported=false;source.selected=false;source.issue="The NUP changed while loading its mapping. Review the current source again before retrying.".into();
+                }
                 source.nup_mapping_request = true;
+                source.nup_generated_mapping = _resources
+                    .iter()
+                    .find(|m| source.nup_mapping.as_ref() == Some(&m.path))
+                    .cloned();
                 source.nup_acknowledged_toc = digest;
                 let result = if source.supported {
                     Ok(())
@@ -272,9 +374,21 @@ fn start(mut job: Job, ctx: &egui::Context) -> Running {
             .map(|_| ())
             .map_err(|e| e.to_string())
         } else {
-            let result =
+            let result = (|| {
+                if let Some(expected) = reviewed_toc {
+                    let current = nxformat_packer::import::inspect_nup_spec(
+                        Path::new(&args[1]),
+                        &nxformat_packer::import::ImportLimits::for_nup(),
+                        &token,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if current.toc_sha256 != expected {
+                        return Err("The NUP changed since its warnings were reviewed. Generate or load its mapping again before conversion.".into());
+                    }
+                }
                 cli::run_with_display(args.clone(), Some(sink), Some(token.clone()), display)
-                    .map_err(|e| e.to_string());
+                    .map_err(|e| e.to_string())
+            })();
             if purpose == Purpose::Contents && result.is_ok() {
                 let options = WriterOptions {
                     cancellation: token,
@@ -291,11 +405,16 @@ fn start(mut job: Job, ctx: &egui::Context) -> Running {
     Running {
         job,
         rx,
-        cancel,
+        cancel: cancel.clone(),
         total: 0,
         done: 0,
         lines: Vec::new(),
         started: Instant::now(),
+        mapping_skipped: false,
+        worker: Some(WorkerGuard {
+            cancel,
+            handle: Some(worker),
+        }),
     }
 }
 
@@ -405,6 +524,27 @@ fn title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    pub(super) fn settle_outputs(app: &mut super::App) {
+        app.outputs.invalidate();
+        let ctx = eframe::egui::Context::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.refresh_outputs(&ctx);
+            if app
+                .games()
+                .iter()
+                .filter(|g| g.planned_output.is_some())
+                .all(|g| g.output_state != super::outputs::OutputState::Checking)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "output check timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
     #[test]
     fn complete_native_datapatch_is_discovered_and_converted_with_its_application() {
         use super::*;
@@ -442,6 +582,7 @@ mod tests {
             .any(|c| c.kind == "dlc" && c.application == app_id && c.version == 7));
         assert_eq!(app.games().len(), 1);
         let output = app.games()[0].output.clone().unwrap();
+        settle_outputs(&mut app);
         app.convert();
         let job = app.queue.pop_front().unwrap();
         cli::run(job.args, None, Some(CancellationToken::default())).unwrap();
@@ -474,6 +615,7 @@ mod tests {
     #[test]
     fn firmware_controls_only_affect_games_with_a_detected_partition() {
         let folder = std::env::temp_dir().join(format!("nxconvert-options-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
         let mut app = App {
             output_dir: Some(folder.clone()),
             sources: [("Card", 1, 32_000), ("Digital", 2, 0)]
@@ -505,6 +647,7 @@ mod tests {
             if game_override {
                 app.omitted_firmware.insert(card_key.clone());
             }
+            settle_outputs(&mut app);
             app.convert();
             assert_eq!(app.queue.len(), 2);
             for flag in ["--omit-firmware", "--no-recipe"] {
@@ -545,11 +688,13 @@ mod tests {
             output_dir: Some(dir.clone()),
             ..Default::default()
         };
+        settle_outputs(&mut app);
         app.convert();
         assert!(app.queue.is_empty());
         app.sources[0].ignore_restore = true;
         app.sources[0].selected = true;
         let output = app.games().remove(0).output.unwrap();
+        settle_outputs(&mut app);
         app.convert();
         let job = app.queue.pop_front().unwrap();
         assert!(job.args.iter().any(|a| a == "--ignore-restore"));
@@ -592,6 +737,7 @@ mod tests {
             ..Default::default()
         };
         let output = app.games().remove(0).output.unwrap();
+        settle_outputs(&mut app);
         app.convert();
         let job = app.queue.pop_front().unwrap();
         cli::run(job.args, None, Some(CancellationToken::default())).unwrap();
@@ -662,6 +808,7 @@ mod tests {
                 },
             );
             let output = app.games().remove(0).output.unwrap();
+            settle_outputs(&mut app);
             app.convert();
             let job = app.queue.pop_front().unwrap();
             assert_eq!(job.args[0], "pack-nup");
@@ -812,6 +959,7 @@ mod tests {
         assert_eq!(app.games().len(), 1);
         assert_eq!(app.games()[0].application, app_id);
         let output = app.games()[0].output.clone().unwrap();
+        settle_outputs(&mut app);
         app.convert();
         let job = app.queue.pop_front().unwrap();
         assert!(job
@@ -931,6 +1079,8 @@ mod tests {
             display: None,
             metadata: None,
             source_bytes: None,
+            mapping_resources: Vec::new(),
+            nup_reviewed_toc: None,
         };
         for expected_success in [true, false] {
             let running = super::start(job(), &ctx);
@@ -956,6 +1106,7 @@ mod tests {
         assert_eq!(app.sources[0].nup_mapping.as_ref(), Some(&mapping));
         assert_eq!(app.sources[0].contents.len(), 2);
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        settle_outputs(&mut app);
         app.convert();
         let job = app.queue.pop_front().unwrap();
         nxformat_packer::cli::run(
@@ -988,13 +1139,22 @@ mod tests {
             ],
             ..Default::default()
         };
-        // The native save API returns None for both cancellation and unavailable dialogs.
-        app.generate_mapping(input.clone(), None, None);
+        app.mapping_review = Some(MappingReview {
+            source: input.clone(),
+            mapping: None,
+            preflight: nxformat_packer::import::inspect_nup_spec(
+                &input,
+                &nxformat_packer::import::ImportLimits::for_nup(),
+                &token,
+            )
+            .unwrap(),
+        });
+        app.cancel_mapping_review();
         assert!(app.sources[0]
             .nup_mapping_feedback
             .as_ref()
             .unwrap()
-            .contains("save dialog"));
+            .contains("cancelled"));
         for (command, output, expected) in [
             (
                 "generate-nup-map",
@@ -1045,6 +1205,8 @@ mod tests {
                 display: None,
                 metadata: None,
                 source_bytes: None,
+                mapping_resources: Vec::new(),
+                nup_reviewed_toc: None,
             },
             rx,
             cancel: CancellationToken::default(),
@@ -1052,6 +1214,8 @@ mod tests {
             done: 0,
             lines: Vec::new(),
             started: Instant::now(),
+            mapping_skipped: false,
+            worker: None,
         });
         app.poll(&ctx);
         assert!(!app.busy());
@@ -1133,6 +1297,8 @@ mod tests {
                 display: None,
                 metadata: None,
                 source_bytes: None,
+                mapping_resources: Vec::new(),
+                nup_reviewed_toc: None,
             },
             &ctx,
         );
@@ -1152,6 +1318,7 @@ mod tests {
         }
         assert!(app.sources[0].supported);
         assert!(app.sources[0].nup_acknowledged_toc.is_some());
+        settle_outputs(&mut app);
         app.convert();
         let job = app.queue.pop_front().unwrap();
         assert!(job
@@ -1246,6 +1413,7 @@ mod tests {
         assert_eq!(app.sources[0].path, root);
         assert_eq!(app.sources[0].tree_roots.len(), 3);
         let output = app.games().remove(0).output.unwrap();
+        settle_outputs(&mut app);
         app.convert();
         let job = app.queue.pop_front().unwrap();
         cli::run_with_display(
@@ -1330,6 +1498,8 @@ struct Game {
     publisher: String,
     sources: Vec<usize>,
     output: Option<PathBuf>,
+    planned_output: Option<PathBuf>,
+    output_state: outputs::OutputState,
     problem: String,
 }
 
@@ -1356,8 +1526,11 @@ struct App {
     remove_confirmation: Option<(String, Vec<String>)>,
     mapping_review: Option<MappingReview>,
     mapping_review_focus: bool,
+    mapping_batch: Option<session_mapping::MappingBatch>,
+    mapping_summary: Option<session_mapping::BatchSummary>,
     sources: Vec<Source>,
     output_dir: Option<PathBuf>,
+    outputs: outputs::OutputMonitor,
     level: i32,
     no_compress: bool,
     recipe: bool,
@@ -1388,8 +1561,11 @@ impl Default for App {
             remove_confirmation: None,
             mapping_review: None,
             mapping_review_focus: false,
+            mapping_batch: None,
+            mapping_summary: None,
             sources: Vec::new(),
             output_dir: None,
+            outputs: Default::default(),
             level: 1,
             no_compress: false,
             recipe: true,
@@ -1408,6 +1584,130 @@ impl Default for App {
 }
 
 impl App {
+    fn review_automatic_mapping(&mut self, path: PathBuf) {
+        let source = self.sources.iter().find(|s| s.path == path);
+        let map = source
+            .and_then(|s| s.nup_mapping.as_ref())
+            .map(|p| text(p))
+            .unwrap_or_default();
+        let ack = source
+            .and_then(|s| s.nup_acknowledged_toc)
+            .map(|d| mapping_digest(&d))
+            .unwrap_or_default();
+        self.push(
+            format!("Checking mapping for {}", file_name(&path)),
+            vec!["review-nup-auto".into(), text(&path), map, ack],
+            Purpose::Scan,
+        );
+    }
+    fn start_mapping_batch(&mut self) {
+        if self.busy() || self.mapping_batch.is_some() {
+            return;
+        }
+        self.mapping_summary = None;
+        self.mapping_batch = Some(session_mapping::MappingBatch {
+            pending: self
+                .sources
+                .iter()
+                .filter(|s| s.kind == SourceKind::Nup)
+                .map(|s| s.path.clone())
+                .collect(),
+            ..Default::default()
+        });
+        self.advance_mapping_batch();
+    }
+    fn advance_mapping_batch(&mut self) {
+        loop {
+            let next = self
+                .mapping_batch
+                .as_mut()
+                .and_then(|b| b.pending.pop_front());
+            let Some(path) = next else {
+                self.complete_mapping_batch(false);
+                return;
+            };
+            if !self.sources.iter().any(|s| s.path == path) {
+                if let Some(b) = &mut self.mapping_batch {
+                    b.skipped += 1;
+                }
+                continue;
+            }
+            self.mapping_batch.as_mut().unwrap().active = Some(path.clone());
+            self.review_automatic_mapping(path);
+            return;
+        }
+    }
+    fn complete_mapping_batch(&mut self, cancelled: bool) {
+        if let Some(batch) = self.mapping_batch.take() {
+            let summary = session_mapping::BatchSummary {
+                generated: batch.generated,
+                skipped: batch.skipped,
+                cancelled: if cancelled {
+                    batch.pending.len() + usize::from(batch.active.is_some())
+                } else {
+                    0
+                },
+                errors: batch.errors,
+            };
+            self.status = format!(
+                "NUP mappings: {} generated, {} skipped, {} failed, {} cancelled.",
+                summary.generated,
+                summary.skipped,
+                summary.errors.len(),
+                summary.cancelled
+            );
+            self.log.push(self.status.clone());
+            self.mapping_summary = Some(summary);
+        }
+    }
+    fn clear_sources(&mut self) {
+        self.sources.clear();
+        self.textures.clear();
+        self.appearances.clear();
+        self.omitted_firmware.clear();
+        self.nup_platforms.clear();
+        self.focused.clear();
+        self.mapping_summary = None;
+        self.outputs.invalidate();
+    }
+    fn release_generated_mapping(&mut self, path: &Path) {
+        if let Some(source) = self
+            .sources
+            .iter_mut()
+            .find(|s| s.path == path && s.nup_generated_mapping.is_some())
+        {
+            source.nup_generated_mapping = None;
+            source.nup_mapping = None;
+            source.nup_acknowledged_toc = None;
+            source.nup_mapping_needed = true;
+            source.supported = false;
+            source.issue = "Generate a NUP mapping before another conversion.".into();
+            source.nup_mapping_feedback = None;
+        }
+    }
+    fn refresh_outputs(&mut self, ctx: &egui::Context) {
+        let plan = self
+            .games()
+            .into_iter()
+            .filter_map(|g| g.planned_output.map(|p| (g.key, p)))
+            .collect();
+        self.outputs.update(plan, ctx);
+    }
+    fn skip_existing(&mut self) {
+        let keys: Vec<_> = self
+            .games()
+            .into_iter()
+            .filter(|g| g.output_state == outputs::OutputState::Exists)
+            .map(|g| g.key)
+            .collect();
+        for key in &keys {
+            if let Some(game) = self.games().into_iter().find(|g| &g.key == key) {
+                self.remove_game(&game);
+            }
+        }
+        self.status=format!("Removed {} queued game(s) whose output file already exists. Existing files were kept; contents were not verified.",keys.len());
+        self.outputs.invalidate();
+    }
     fn mapping_feedback(&mut self, path: &Path, message: String) {
         if let Some(source) = self.sources.iter_mut().find(|source| source.path == path) {
             source.nup_mapping_feedback = Some(message.clone());
@@ -1416,28 +1716,19 @@ impl App {
         self.log.push(self.status.clone());
     }
 
-    fn generate_mapping(
-        &mut self,
-        source: PathBuf,
-        output: Option<PathBuf>,
-        acknowledgment: Option<[u8; 32]>,
-    ) {
-        if let Some(output) = output {
-            if let Some(s) = self.sources.iter_mut().find(|s| s.path == source) {
-                s.nup_mapping_feedback = None;
-            }
-            let mut args = vec!["generate-nup-map".into(), text(&source), text(&output)];
-            if let Some(digest) = acknowledgment {
-                args.push(mapping_digest(&digest));
-            }
-            self.push(
-                format!("Generating mapping for {}", file_name(&source)),
-                args,
-                Purpose::Scan,
-            );
-        } else {
-            self.mapping_feedback(&source,"No mapping saved: the save dialog was cancelled or unavailable. Choose Generate NUP mapping again and select a new file in a writable folder.".into());
+    fn generate_mapping(&mut self, source: PathBuf, acknowledgment: Option<[u8; 32]>) {
+        if let Some(s) = self.sources.iter_mut().find(|s| s.path == source) {
+            s.nup_mapping_feedback = None;
         }
+        let mut args = vec!["generate-nup-map".into(), text(&source), "@session".into()];
+        if let Some(digest) = acknowledgment {
+            args.push(mapping_digest(&digest));
+        }
+        self.push(
+            format!("Generating mapping for {}", file_name(&source)),
+            args,
+            Purpose::Scan,
+        );
     }
 
     fn cancel_mapping_review(&mut self) {
@@ -1447,6 +1738,25 @@ impl App {
                 "Compatibility cancelled. No mapping was generated or activated.".into(),
             );
         }
+        self.complete_mapping_batch(true);
+    }
+    fn accept_mapping_review(&mut self) {
+        if let Some(review) = self.mapping_review.take() {
+            if let Some(mapping) = review.mapping {
+                self.push(
+                    "Loading reviewed NUP mapping",
+                    vec![
+                        "scan-nup-map".into(),
+                        text(&review.source),
+                        text(&mapping),
+                        mapping_digest(&review.preflight.toc_sha256),
+                    ],
+                    Purpose::Scan,
+                );
+            } else {
+                self.generate_mapping(review.source, Some(review.preflight.toc_sha256));
+            }
+        }
     }
 
     fn busy(&self) -> bool {
@@ -1454,6 +1764,23 @@ impl App {
     }
 
     fn push(&mut self, label: impl Into<String>, args: Vec<String>, purpose: Purpose) {
+        let nup_reviewed_toc = if args.first().is_some_and(|a| a == "pack-nup") {
+            args.get(1)
+                .and_then(|p| {
+                    self.sources
+                        .iter()
+                        .find(|s| s.path == Path::new(p) && s.nup_mapping.is_some())
+                })
+                .and_then(|s| s.nup_acknowledged_toc)
+        } else {
+            None
+        };
+        let mapping_resources = self
+            .sources
+            .iter()
+            .filter(|s| args.iter().any(|a| Path::new(a) == s.path))
+            .filter_map(|s| s.nup_generated_mapping.clone())
+            .collect();
         self.queue.push_back(Job {
             label: label.into(),
             args,
@@ -1461,6 +1788,8 @@ impl App {
             display: None,
             metadata: None,
             source_bytes: None,
+            mapping_resources,
+            nup_reviewed_toc,
         });
     }
 
@@ -1587,6 +1916,8 @@ impl App {
                         publisher: String::new(),
                         sources: Vec::new(),
                         output: None,
+                        planned_output: None,
+                        output_state: Default::default(),
                         problem: String::new(),
                     });
                     games.len() - 1
@@ -1632,6 +1963,24 @@ impl App {
                             .any(|c| c.kind == "base" || c.kind == "standalone")
                 })
                 .collect();
+            let representative = bases
+                .first()
+                .copied()
+                .or_else(|| game.sources.first().map(|&i| &self.sources[i]));
+            if let Some(source) = representative {
+                let folder = self
+                    .output_dir
+                    .clone()
+                    .or_else(|| source.path.parent().map(Path::to_path_buf))
+                    .unwrap_or_default();
+                let path = folder.join(format!(
+                    "{} [{:016X}].nx",
+                    safe_name(&game.name),
+                    game.application
+                ));
+                game.output_state = self.outputs.state(&path);
+                game.planned_output = Some(path);
+            }
             match bases.len() {
                 // A source that already says why it has no base needs no second message.
                 0 if game
@@ -1657,23 +2006,34 @@ impl App {
                 game.problem = "Select Switch 1 or Switch 2 for this NUP.".into();
                 continue;
             }
-            let folder = self
-                .output_dir
-                .clone()
-                .or_else(|| bases[0].path.parent().map(Path::to_path_buf))
-                .unwrap_or_default();
-            let output = folder.join(format!(
-                "{} [{:016X}].nx",
-                safe_name(&game.name),
-                game.application
-            ));
-            if output.exists() {
+            let output = game.planned_output.clone().unwrap();
+            if game.output_state == outputs::OutputState::Exists {
                 game.problem = format!(
                     "{} already exists. Open it in Contents to add updates or DLC.",
                     file_name(&output)
                 );
+            } else if let outputs::OutputState::Blocked(error) = &game.output_state {
+                game.problem = error.clone();
             } else {
                 game.output = Some(output);
+            }
+        }
+        let mut destinations = HashMap::new();
+        for game in &games {
+            if let Some(path) = &game.planned_output {
+                *destinations
+                    .entry(outputs::collision_key(path))
+                    .or_insert(0usize) += 1;
+            }
+        }
+        for game in &mut games {
+            if game
+                .planned_output
+                .as_ref()
+                .is_some_and(|p| destinations[&outputs::collision_key(p)] > 1)
+            {
+                game.output = None;
+                game.problem="Several queued games have the same output path. Change their configured titles or output folder before converting.".into();
             }
         }
         games
@@ -1728,6 +2088,9 @@ impl App {
 
     fn convert(&mut self) {
         for game in self.games() {
+            if game.output_state != outputs::OutputState::Missing {
+                continue;
+            }
             let Some(output) = &game.output else {
                 continue;
             };
@@ -1832,6 +2195,9 @@ impl App {
     fn add_scanned_sources(&mut self, sources: Vec<Source>, ctx: &egui::Context) {
         for mut source in sources {
             let existing = self.sources.iter().position(|s| s.path == source.path);
+            if existing.is_none() && source.nup_generated_mapping.is_some() {
+                continue;
+            }
             let mut previous_defaults = None;
             if let Some(index) = existing {
                 let previous = &self.sources[index];
@@ -1841,6 +2207,9 @@ impl App {
                     if previous.nup_mapping.is_some()
                         && source.nup_mapping.is_none()
                         && !source.nup_mapping_request
+                        && source.nup_mapping_needed
+                        && source.nup_toc.is_some()
+                        && source.nup_toc == previous.nup_toc
                     {
                         continue;
                     }
@@ -1892,6 +2261,7 @@ impl App {
     // ---- command results ----
 
     fn poll(&mut self, ctx: &egui::Context) {
+        self.refresh_outputs(ctx);
         if self.running.is_none() {
             if let Some(job) = self.queue.pop_front() {
                 self.status = job.label.clone();
@@ -1960,6 +2330,7 @@ impl App {
                     self.mapping_review = Some(review);
                     self.mapping_review_focus = true;
                 }
+                Message::MappingSkipped => running.mapping_skipped = true,
                 Message::Sources(sources) => scanned.extend(sources),
                 Message::Metadata(mut metadata) => {
                     self.archive_cover = metadata
@@ -2008,12 +2379,13 @@ impl App {
         }
     }
 
-    fn finish(&mut self, running: Running, result: Result<(), String>, cancelled: bool) {
+    fn finish(&mut self, mut running: Running, result: Result<(), String>, cancelled: bool) {
+        drop(running.worker.take());
         let mapping_source = (running.job.purpose == Purpose::Scan
             && running.job.args.first().is_some_and(|cmd| {
                 matches!(
                     cmd.as_str(),
-                    "generate-nup-map" | "scan-nup-map" | "review-nup-map"
+                    "generate-nup-map" | "scan-nup-map" | "review-nup-map" | "review-nup-auto"
                 )
             }))
         .then(|| running.job.args.get(1).map(PathBuf::from))
@@ -2075,16 +2447,66 @@ impl App {
                 }
             }
         };
-        if let Some(source) = mapping_source {
+        if let Some(source) = &mapping_source {
             if let Err(error) = &result {
                 let step = if cancelled {
                     "Generation cancelled. Retry Generate NUP mapping when ready."
                 } else {
-                    "No new mapping was activated. For save errors, choose a new filename in a writable folder. For metadata conflicts, re-export the source with consistent metadata; a reviewed mapping must still pass identity checks."
+                    "Retry generation for temporary-storage errors. For metadata conflicts, supply a coherent source or a reviewed manual mapping; identity checks still apply."
                 };
                 self.mapping_feedback(&source, format!("Mapping failed: {error}\n{step}"));
-            } else if let Some(s) = self.sources.iter_mut().find(|s| s.path == source) {
+            } else if let Some(s) = self.sources.iter_mut().find(|s| &s.path == source) {
                 s.nup_mapping_feedback = None;
+            }
+        }
+        if running.job.purpose == Purpose::Pack {
+            let paths: Vec<_> = self
+                .sources
+                .iter()
+                .filter(|s| running.job.args.iter().any(|a| Path::new(a) == s.path))
+                .map(|s| s.path.clone())
+                .collect();
+            for path in paths {
+                self.release_generated_mapping(&path);
+            }
+            if cancelled {
+                let paths: Vec<_> = self
+                    .sources
+                    .iter()
+                    .filter(|s| s.nup_generated_mapping.is_some())
+                    .map(|s| s.path.clone())
+                    .collect();
+                for p in paths {
+                    self.release_generated_mapping(&p);
+                }
+            }
+            self.outputs.invalidate();
+        }
+        if let Some(source) = &mapping_source {
+            if self.mapping_batch.as_ref().and_then(|b| b.active.as_ref()) == Some(source) {
+                if cancelled {
+                    self.complete_mapping_batch(true);
+                } else if let Err(error) = &result {
+                    let b = self.mapping_batch.as_mut().unwrap();
+                    b.errors.push((source.clone(), error.clone()));
+                    b.active = None;
+                    self.advance_mapping_batch();
+                } else if running.mapping_skipped {
+                    let b = self.mapping_batch.as_mut().unwrap();
+                    b.skipped += 1;
+                    b.active = None;
+                    self.advance_mapping_batch();
+                } else if running
+                    .job
+                    .args
+                    .first()
+                    .is_some_and(|a| a == "generate-nup-map" || a == "scan-nup-map")
+                {
+                    let b = self.mapping_batch.as_mut().unwrap();
+                    b.generated += 1;
+                    b.active = None;
+                    self.advance_mapping_batch();
+                }
             }
         }
         if running.job.purpose == Purpose::Edit {

@@ -47,6 +47,7 @@ Fork of [fab918/nxformat](https://github.com/fab918/nxformat). Credit to its aut
 - **Sparse NCA3:** stream mapped content and generate missing regions as zeros, without a full decrypted temporary package. Missing game data still requires its matching update.
 - **Multi-program NUP:** generate or load a TOC-bound mapping in the GUI or CLI to retain native primary/auxiliary programs, matching updates and separate DLC. Generation requires consistent embedded metadata. [Usage and limits](docs/NUP-COMPATIBILITY.md).
 - **NUP launch and version handling:** use validated native launch metadata for supported nonzero-index programs. Missing native application versions and DLC minimums stay explicitly unresolved, with a separate warning and opt-in; known conflicts still reject.
+- **Queue tools:** generate required NUP mappings in a batch with per-file review and automatic session cleanup. Mark existing output files and remove their games from the queue with **Skip Already Existing**; existence does not verify their contents.
 
 Originals remain intact. With decryption enabled, recipes default off; enabled recipes rebuild decrypted bytes. [Usage and key requirements](LOCAL-DECRYPTION.md).
 
@@ -58,6 +59,7 @@ Originals remain intact. With decryption enabled, recipes default off; enabled r
 | Sparse NCA3 and skip-hash modes | Synthetic tests only; sparse base/update conversion, strict NX verification and recipe replay pass. Real sparse games remain untested |
 | Explicit multi-program NUP mapping | Synthetic cases and real multi-program conversions, strict verification and source-file comparison passed; gameplay untested |
 | Complete DataPatch DLC updates | Real materialized NUP conversion, strict verification and full source comparison pass; native conversion/decryption remains synthetic-tested. Gameplay untested |
+| Batch mappings, session cleanup and output checks | Automated GUI workflow/layout tests with synthetic sources; see [test details](TESTING.md) for native visual evidence and limits |
 | Encrypted Switch 2, NCA0/NCA2, XTS content sections, NCZ/NSZ/XCZ | Unsupported |
 | Emulator gameplay; this fork on Linux/macOS | Untested |
 

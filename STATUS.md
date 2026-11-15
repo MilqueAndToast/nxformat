@@ -1,5 +1,27 @@
 # NXConvert local decryption fork
 
+## GUI queue update — 2026-11-15
+
+Implemented automatic session NUP mappings and batch generation with per-file
+review, retained successes and individual errors. Strict-valid NUPs bypass
+mapping; generated files have managed reader lifetimes and cleanup. Manual maps
+and original sources remain untouched. Compatibility warnings scroll with
+reachable actions. The pre-load key hint explains optional adjacent title.keys.
+
+Background checks follow each game's exact configured output path. Existing
+files get an **Already exists** badge; **Skip Already Existing** removes their
+games from the queue without changing files or asserting content integrity.
+Blocked destinations, collisions and stale async results are covered.
+
+33 GUI tests passed, plus the synthetic visual-fixture exporter. Automated
+layout checks cover small viewports and multiple scales. The Windows build and
+native synthetic-source checks passed at default and minimum window sizes,
+including batch continuation, cancellation, scrolling actions and queue-only
+skip. Physical display-scale changes were not tested. See TESTING.md for
+validation evidence and limits. Publication is pending PM review.
+
+## Earlier checkpoints
+
 Ready: implemented, built, and verified on Windows x64. No outstanding blocker for the documented supported scope.
 
 - Branch: `codex/local-key-decryption`.

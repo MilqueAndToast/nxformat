@@ -1,5 +1,41 @@
 # Local-decryption validation
 
+## GUI queue workflows — 2026-11-15
+
+33 GUI tests passed; one explicitly invoked fixture-export test also passed.
+Synthetic sources exercise mixed batch success/failure continuation, strict-valid
+NUPs without CNMT, unchanged-map reuse, per-source warning review, stale TOC
+rejection before generation and queued conversion, and manual-map preservation.
+Owned mapping tests cover queued reader lifetimes, removal, clear, cancellation,
+failed conversion, retry, successful conversion and normal app destruction.
+Original source bytes remain unchanged.
+
+Output tests check exact configured paths, title/folder changes, occupied paths
+and parents, collisions, stale worker results, conversion invalidation and
+queue-only skipping. A deliberately invalid existing output proves that the
+badge reports file existence without claiming integrity or equivalence.
+Headless layout tests check toolbar/badge positions at widths 440, 636 and 900;
+modal actions fit physical heights 400, 560 and 680 at 100%, 150% and 200% scale,
+with a scrolling warning body and safe Escape cancellation.
+
+The built Windows app was also checked natively with four synthetic sources at
+1040 × 680 and the minimum 900 × 560 client size. The key hint, toolbar order,
+existing-output badge and absence of mapping controls on the direct-valid source
+were visible. A cancelled batch retained its queue. A completed batch reported
+two generated, one skipped and one failed, continued past the metadata failure,
+and showed generated state without a save dialog. At minimum size the warning
+body scrolled while both actions stayed reachable; Continue completed the batch.
+Skip removed the existing-output game from the queue. The test app then closed
+normally. Native checks used the current display scale; 150%/200% are automated
+layout coverage, not physical display-scale validation.
+
+The Windows package passed version/help checks and direct/mapped synthetic
+conversion, strict verification and full source-file comparison. All fixture
+inputs and the existing-output placeholder retained their SHA-256 hashes.
+
+This update changes GUI orchestration only; the packer and NX wire format are
+unchanged. It adds no gameplay, format-support or clean-machine validation claim.
+
 ## Native NUP launch selection and unknown versions — 2026-11-15
 
 Source builds distinguish an unknown authoritative application version from a

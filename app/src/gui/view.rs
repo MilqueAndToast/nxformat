@@ -169,18 +169,19 @@ impl App {
         });
     }
 
-    fn source_list(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+    pub(super) fn source_list(&mut self, ui: &mut egui::Ui) {
+        let narrow_toolbar = ui.available_width() < 580.0;
+        if narrow_toolbar {
             ui.heading("Sources");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        }
+        ui.horizontal(|ui| {
+            if !narrow_toolbar {ui.heading("Sources");}
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true), |ui| {
                 if ui.button("Clear").clicked() {
-                    self.sources.clear();
-                    self.textures.clear();
-                    self.appearances.clear();
-                    self.omitted_firmware.clear();
-                    self.nup_platforms.clear();
-                    self.focused.clear();
+                    self.clear_sources();
                 }
+                let existing=self.games().iter().any(|g|g.output_state==outputs::OutputState::Exists);
+                if ui.add_enabled(existing,egui::Button::new("Skip Already Existing")).on_hover_text("Remove queued games whose exact output file exists. Files are kept; their contents are not verified.").clicked(){self.skip_existing();}
                 if theme::button(ui, Icon::Folder, "Folder", false).clicked() {
                     self.choose_sources(true);
                 }
@@ -189,6 +190,43 @@ impl App {
                 }
             });
         });
+        if self
+            .sources
+            .iter()
+            .any(|s| s.kind == SourceKind::Nup && s.nup_mapping_needed)
+        {
+            let needed = self
+                .sources
+                .iter()
+                .any(|s| s.nup_mapping_needed && (s.nup_mapping.is_none() || !s.supported));
+            if ui.add_enabled(!self.busy() && needed,egui::Button::new("Generate NUP mappings for all")).on_hover_text("Generate only where strict import needs a mapping. Each file's warnings require its own review; individual failures do not stop the batch.").clicked(){self.start_mapping_batch();}
+        }
+        if let Some(summary) = &self.mapping_summary {
+            ui.label(format!(
+                "NUP mappings: {} generated · {} skipped · {} failed · {} cancelled",
+                summary.generated,
+                summary.skipped,
+                summary.errors.len(),
+                summary.cancelled
+            ));
+            if !summary.errors.is_empty() {
+                egui::CollapsingHeader::new("Mapping errors by source")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("mapping-errors")
+                            .max_height(140.0)
+                            .show(ui, |ui| {
+                                for (path, error) in &summary.errors {
+                                    ui.colored_label(
+                                        ui.visuals().error_fg_color,
+                                        format!("{}: {error}", file_name(path)),
+                                    );
+                                }
+                            });
+                    });
+            }
+        }
         ui.add_space(12.0);
         let games = self.games();
         if !games.iter().any(|g| g.key == self.focused) {
@@ -263,6 +301,11 @@ impl App {
                                     }
                                     if ui.selectable_label(focused, "Configure").clicked() {
                                         self.focused = game.key.clone();
+                                    }
+                                    if game.output_state==outputs::OutputState::Exists {
+                                        ui.label(egui::RichText::new("Already exists").color(ACCENT).small()).on_hover_text("The planned output file exists. Its integrity and content equivalence have not been checked.");
+                                    } else if game.output_state==outputs::OutputState::Checking && game.planned_output.is_some() {
+                                        ui.label(theme::muted("Checking output…").small());
                                     }
                                     ui.with_layout(
                                         egui::Layout::top_down(egui::Align::Min),
@@ -347,16 +390,17 @@ impl App {
                                         });
                                 });
                             }
-                            if source.kind == SourceKind::Nup {
+                            if source.kind == SourceKind::Nup && source.nup_mapping_needed {
                                 ui.horizontal_wrapped(|ui| {
-                                    if ui.add_enabled(mapping_enabled, egui::Button::new("Generate NUP mapping…")).clicked() { review_request=Some((source.path.clone(),None)); }
-                                    if ui.add_enabled(mapping_enabled, egui::Button::new("Load NUP mapping…")).clicked() {
+                                    if source.nup_mapping.is_none() || !source.supported {if ui.add_enabled(mapping_enabled, egui::Button::new("Generate NUP mapping")).clicked() { review_request=Some((source.path.clone(),None)); }}
+                                    if source.nup_generated_mapping.is_some(){ui.label("NUP mapping generated");}
+                                    if ui.add_enabled(mapping_enabled, egui::Button::new("Load mapping (advanced)…")).clicked() {
                                         if let Some(path)=rfd::FileDialog::new().add_filter("NUP mapping", &["nxnupmap"]).pick_file() {
                                             review_request=Some((source.path.clone(),Some(path)));
                                         }
                                     }
-                                    if let Some(path)=&source.nup_mapping {
-                                        ui.label("Explicit compatibility mapping active").on_hover_text(text(path));
+                                    if source.nup_mapping.is_some() {
+                                        if source.nup_generated_mapping.is_none(){ui.label("Imported NUP mapping active");}
                                         if ui.add_enabled(mapping_enabled,egui::Button::new("Remove mapping")).clicked() {mapping_request=Some((source.path.clone(),None));}
                                     }
                                 });
@@ -418,8 +462,8 @@ impl App {
                 for source in self.sources.iter().filter(|s| s.contents.is_empty()) {
                     theme::card().show(ui, |ui| {
                         ui.strong(file_name(&source.path));
-                        if source.kind == SourceKind::Nup && ui.add_enabled(mapping_enabled, egui::Button::new("Generate NUP mapping…")).clicked() { review_request=Some((source.path.clone(),None)); }
-                        if source.kind == SourceKind::Nup && ui.add_enabled(mapping_enabled,egui::Button::new("Load NUP mapping…")).clicked() {
+                        if source.kind == SourceKind::Nup && source.nup_mapping_needed && ui.add_enabled(mapping_enabled, egui::Button::new("Generate NUP mapping")).clicked() { review_request=Some((source.path.clone(),None)); }
+                        if source.kind == SourceKind::Nup && source.nup_mapping_needed && ui.add_enabled(mapping_enabled,egui::Button::new("Load mapping (advanced)…")).clicked() {
                             if let Some(path)=rfd::FileDialog::new().add_filter("NUP mapping", &["nxnupmap"]).pick_file() {review_request=Some((source.path.clone(),Some(path)));}
                         }
                         if source.nup_mapping.is_some() && ui.add_enabled(mapping_enabled, egui::Button::new("Remove mapping")).clicked() {
@@ -448,6 +492,10 @@ impl App {
             self.push("Checking NUP mapping", args, Purpose::Scan);
         }
         if let Some((source, mapping)) = review_request {
+            if mapping.is_none() {
+                self.review_automatic_mapping(source);
+                return;
+            }
             let mut args = vec!["review-nup-map".into(), text(&source)];
             if let Some(mapping) = mapping {
                 args.push(text(&mapping));
@@ -523,7 +571,7 @@ impl App {
                 }
             }
             ui.add_space(20.0);
-            let ready=games.iter().filter(|g|g.output.is_some()).count();
+            let ready=games.iter().filter(|g|g.output.is_some() && g.output_state==outputs::OutputState::Missing).count();
             ui.add_enabled_ui(ready>0,|ui| {
                 if theme::button(ui,Icon::Arrow,&format!("Convert {ready} game{}",if ready==1 {""} else {"s"}),true).clicked(){self.last_output=None;self.convert();}
             });
@@ -1064,7 +1112,7 @@ impl eframe::App for App {
                         if let Some(path) = &self.keys_path {
                             ui.label(format!("Keys: {}", path.display()));
                         } else {
-                            ui.label("Encrypted NSP/XCI: load your local prod.keys first.");
+                            ui.label("Encrypted NSP/XCI: load your local prod.keys first. Optional title.keys beside it loads automatically when present.");
                         }
                     });
                 });
@@ -1104,37 +1152,19 @@ impl eframe::App for App {
             });
         }
         if let Some(review) = self.mapping_review.clone() {
-            egui::Modal::new(egui::Id::unique("generate-nup-map")).show(&ctx, |ui| {
-                ui.set_width(500.0);
-                ui.heading(file_name(&review.source));
-                if !review.preflight.violations.is_empty() {
-                    ui.colored_label(ui.visuals().warn_fg_color,"This input does not conform to the NUP v1 specification.");
-                    egui::ScrollArea::vertical().max_height(220.0).show(ui,|ui| { for violation in &review.preflight.violations { ui.label(violation); } });
-                    ui.label("Compatibility preserves supported contents in NX; it does not repair NUP conformance. Your consent cannot override unsupported content, identity conflicts, missing required content or integrity failures.");
-                } else { ui.label("No representational NUP v1 violations detected. Content and identity checks still apply."); }
-                if !review.preflight.unresolved_requirements.is_empty() {
-                    ui.colored_label(ui.visuals().warn_fg_color,"Unresolved native runtime requirements:");
-                    egui::ScrollArea::vertical().id_salt("nup-runtime-requirements").max_height(180.0).show(ui,|ui| { for warning in &review.preflight.unresolved_requirements { ui.label(warning); } });
-                    ui.label("Continuing preserves these requirements as unresolved. It does not establish a satisfying application version or runtime compatibility.");
+            let dialog = mapping_dialog::show(
+                &ctx,
+                &review,
+                &mut self.mapping_review_focus,
+                self.mapping_batch.is_some(),
+            );
+            if let Some(accept) = dialog.answer {
+                if !accept {
+                    self.cancel_mapping_review();
+                } else {
+                    self.accept_mapping_review();
                 }
-                ui.label("Automatic generation can use validated native launch metadata, including a nonzero program index; otherwise it uses the documented index-zero convention. Missing or conflicting relationship evidence stops generation.");
-                ui.label("Continuing declares that the stored program trees are complete. Metadata cannot prove this or guarantee the game will boot. Your source stays unchanged.");
-                ui.horizontal(|ui| {
-                    let cancel=ui.button("Cancel");
-                    if self.mapping_review_focus { cancel.request_focus(); self.mapping_review_focus=false; }
-                    if cancel.clicked() || ui.input(|i|i.key_pressed(egui::Key::Escape)) { self.cancel_mapping_review(); }
-                    let label=if review.preflight.violations.is_empty() {"Continue with reviewed mapping"} else {"Continue in compatibility mode"};
-                    if ui.button(label).clicked() {
-                        self.mapping_review = None;
-                        if let Some(mapping)=&review.mapping {
-                            self.push("Loading reviewed NUP mapping",vec!["scan-nup-map".into(),text(&review.source),text(mapping),mapping_digest(&review.preflight.toc_sha256)],Purpose::Scan);
-                        } else {
-                            let output = rfd::FileDialog::new().add_filter("NUP mapping", &["nxnupmap"]).set_file_name(review.source.with_extension("nxnupmap").file_name().unwrap().to_string_lossy()).save_file();
-                            self.generate_mapping(review.source.clone(), output,Some(review.preflight.toc_sha256));
-                        }
-                    }
-                });
-            });
+            }
         }
         let hovered = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if hovered && !busy {
