@@ -1,5 +1,46 @@
 # Local-decryption validation
 
+## DataPatch support — 2026-11-15
+
+Unreleased source adds the [documented complete-view subset](docs/DATAPATCH.md).
+The shared CNMT parser decodes target DataId, owning application, patch title,
+required application version and AddOnContent's forward DataPatchId separately.
+Native snapshots preserve actual Meta/Data NCAs and Content IDs; materialized
+snapshots preserve original metadata while identifying the updated target DLC.
+
+Validation: 280 packer tests passed (one intentionally ignored), plus 15 GUI
+tests. Synthetic coverage includes:
+
+- Full materialized NUP conversion in staged and streamed modes; separate old and
+  updated DLC, preserved patch metadata, deletions without filename overlay,
+  exact primary-Program minimum-version dependencies, strict NX verification,
+  complete source comparison and extraction.
+- Complete native DataPatch discovery, planning, conversion and addition through
+  normal CLI/GUI flows; exact application/target metadata, standalone IVFC Data
+  NCAs, extraction under the target DLC ID, exact NX restoration and native
+  package recipe replay. Real gameplay is not implied by these artificial files.
+- Artificial AES-CTR input through the production decrypted-source adapter,
+  paranoid conversion, strict verification and decrypted recipe replay. Both
+  declared target/patch NCA-owner forms are covered; no console keys are used.
+- Truncated headers, zero/self/unrelated targets, conflicting forward links,
+  unmet application versions, ambiguous materialized version scopes, wrong NCA
+  owners, corrupt IVFC, missing Data content and raw BKTR refusal. Sparse
+  DataPatch remains untested and is rejected by the same storage guard.
+
+An in-write dependency bug found by the multi-program case was corrected:
+pending dependencies now include the exact Program ID, avoiding selection of an
+auxiliary snapshot with the same type/version as the primary. This changes no
+NX wire format. GUI discovery now includes supported native DataPatch content.
+
+The current real NUP containing a DataPatch was reread and its TOC hash verified.
+Generation now recognizes DataPatch and reports only its separate missing-main-
+executable blocker. No mapping/output was published for that incomplete source;
+no real DataPatch conversion, gameplay or new manual UI validation is claimed.
+The prior spec warning/affirmative opt-in remains in force. Raw BKTR/sparse
+DataPatch reconstruction, native encrypted Switch 2 input and additional native
+layouts remain unsupported. Originals were read-only. Private evidence and logs
+are under ignored `results/multi-program-nup/`.
+
 ## Spec warnings and compatibility corrections — 2026-11-14
 
 This unreleased follow-up supersedes the earlier blanket mixed-platform refusal.

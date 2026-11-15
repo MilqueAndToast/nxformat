@@ -43,6 +43,7 @@ Fork of [fab918/nxformat](https://github.com/fab918/nxformat). Credit to its aut
 ## Added in this fork
 
 - **Local decryption:** load `prod.keys` and optional `title.keys` in the GUI or CLI to convert supported encrypted NSP/XCI files directly, with matching updates and DLC.
+- **DLC DataPatch updates (source build):** convert complete materialized NUP views and complete native Data NCAs, preserving target IDs and version requirements. Base-dependent raw patches remain unsupported. [Scope](docs/DATAPATCH.md).
 - **Sparse NCA3:** stream mapped content and generate missing regions as zeros, without a full decrypted temporary package. Missing game data still requires its matching update.
 - **Multi-program NUP:** generate or load a TOC-bound mapping in the GUI or CLI to retain native primary/auxiliary programs, matching updates and separate DLC. Generation requires consistent embedded metadata. [Usage and limits](docs/NUP-COMPATIBILITY.md).
 
@@ -55,6 +56,7 @@ Originals remain intact. With decryption enabled, recipes default off; enabled r
 | NCA3 NSP/XCI, CTR and CTR-EX decryption | Tested with real game dumps |
 | Sparse NCA3 and skip-hash modes | Synthetic tests only; sparse base/update conversion, strict NX verification and recipe replay pass. Real sparse games remain untested |
 | Explicit multi-program NUP mapping | Synthetic cases and real multi-program conversions, strict verification and source-file comparison passed; gameplay untested |
+| Complete DataPatch DLC updates (source build) | Synthetic materialized/native conversion, decryption, extraction and recipe/restoration checks; real conversions untested |
 | Encrypted Switch 2, NCA0/NCA2, XTS content sections, NCZ/NSZ/XCZ | Unsupported |
 | Emulator gameplay; this fork on Linux/macOS | Untested |
 

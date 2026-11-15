@@ -18,7 +18,11 @@ fn cnmt_platform_matches(
         (0, Platform::Switch1) | (1, Platform::Switch2) => true,
         (0, Platform::Switch2) => {
             switch2_executable
-                && meta.meta_type == crate::native::ContentMetaType::AddOnContent
+                && matches!(
+                    meta.meta_type,
+                    crate::native::ContentMetaType::AddOnContent
+                        | crate::native::ContentMetaType::DataPatch
+                )
                 && !meta
                     .contents
                     .iter()
@@ -230,7 +234,6 @@ impl Mapping {
             if s.snapshot_type == SnapshotType::Dlc {
                 if p.kind != 2
                     || s.addon_title_id != Some(p.title_id)
-                    || s.numeric_version != p.version
                     || p.exefs != NONE
                     || s.program_id.is_some()
                     || s.program_kind != ProgramKind::Unknown
@@ -261,6 +264,7 @@ impl Mapping {
                     ));
                 }
             }
+            let own_cnmts_start = cnmts.len();
             for (name, index) in &tree.files {
                 if name.starts_with("data/__nup_root__/meta/") && name.ends_with(".cnmt") {
                     metadata_bytes = metadata_bytes
@@ -288,6 +292,20 @@ impl Mapping {
                             s.snapshot_type == SnapshotType::Dlc
                                 && s.addon_title_id == Some(meta.title_id)
                         }
+                        crate::native::ContentMetaType::DataPatch => {
+                            s.snapshot_type == SnapshotType::Dlc
+                                && s.addon_title_id == meta.data_id
+                                && meta.contents.iter().any(|r| {
+                                    r.record_type == crate::native::ContentRecordType::Data
+                                })
+                                && meta.contents.iter().all(|r| {
+                                    matches!(
+                                        r.record_type,
+                                        crate::native::ContentRecordType::Data
+                                            | crate::native::ContentRecordType::Meta
+                                    )
+                                })
+                        }
                         _ => false,
                     };
                     if !own_kind_matches {
@@ -297,6 +315,16 @@ impl Mapping {
                     }
                     cnmts.push(meta);
                 }
+            }
+            if s.snapshot_type == SnapshotType::Dlc
+                && s.numeric_version != p.version
+                && !cnmts[own_cnmts_start..]
+                    .iter()
+                    .any(|m| m.meta_type == crate::native::ContentMetaType::DataPatch)
+            {
+                return Err(bad(
+                    "DLC version differs from source without native DataPatch evidence",
+                ));
             }
             indices.push(i);
             trees.push(tree);
@@ -337,6 +365,23 @@ impl Mapping {
                         "update dependency is not an earlier base of the same program",
                     ));
                 }
+            } else if s.snapshot_type == SnapshotType::Dlc {
+                for (kind, key) in &s.dependencies {
+                    let target = manifest
+                        .snapshots
+                        .iter()
+                        .find(|b| &b.key == key)
+                        .ok_or_else(|| bad("missing DLC application dependency"))?;
+                    if *kind != crate::DependencyKind::Requires
+                        || target.program_kind != ProgramKind::Primary
+                        || target.application_id != s.application_id
+                        || target.snapshot_type == SnapshotType::Dlc
+                    {
+                        return Err(bad(
+                            "DLC dependency must require its primary application snapshot",
+                        ));
+                    }
+                }
             } else if !s.dependencies.is_empty() {
                 return Err(bad("unexpected mapping dependency"));
             }
@@ -365,8 +410,13 @@ impl Mapping {
                 .snapshots
                 .iter()
                 .filter(|s| {
-                    if meta.meta_type == crate::native::ContentMetaType::AddOnContent {
-                        s.addon_title_id == Some(meta.title_id)
+                    if matches!(
+                        meta.meta_type,
+                        crate::native::ContentMetaType::AddOnContent
+                            | crate::native::ContentMetaType::DataPatch
+                    ) {
+                        s.addon_title_id == Some(meta.data_id.unwrap_or(meta.title_id))
+                            && s.numeric_version == meta.version
                     } else {
                         s.program_id.is_some() && s.numeric_version == meta.version
                     }
@@ -427,16 +477,43 @@ impl Mapping {
                         s.snapshot_type,
                         SnapshotType::Update | SnapshotType::StandaloneUpdate
                     ),
-                    crate::native::ContentMetaType::AddOnContent => {
+                    crate::native::ContentMetaType::AddOnContent
+                    | crate::native::ContentMetaType::DataPatch => {
                         s.snapshot_type == SnapshotType::Dlc && s.numeric_version == meta.version
                     }
                     _ => false,
                 };
+                if s.snapshot_type == SnapshotType::Dlc
+                    && meta.required_application_version.unwrap_or(0) > 0
+                {
+                    let minimum = meta.required_application_version.unwrap();
+                    if !s.dependencies.iter().any(|(_, key)| {
+                        manifest.snapshots.iter().any(|d| {
+                            &d.key == key
+                                && d.program_kind == ProgramKind::Primary
+                                && d.numeric_version >= minimum
+                        })
+                    }) {
+                        return Err(bad("DLC required application version is not represented by an exact dependency"));
+                    }
+                }
                 if !compatible {
                     return Err(bad(
                         "mapping snapshot kind/version contradicts embedded CNMT",
                     ));
                 }
+            }
+        }
+        for patch in cnmts
+            .iter()
+            .filter(|m| m.meta_type == crate::native::ContentMetaType::DataPatch)
+        {
+            if cnmts.iter().any(|m| {
+                m.meta_type == crate::native::ContentMetaType::AddOnContent
+                    && Some(m.title_id) == patch.data_id
+                    && m.data_patch_id.is_some_and(|id| id != patch.title_id)
+            }) {
+                return Err(bad("target AddOnContent declares a different DataPatchId"));
             }
         }
         Ok(Self {

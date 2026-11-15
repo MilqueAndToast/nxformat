@@ -14,6 +14,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 #[cfg(test)]
+mod datapatch_tests;
+#[cfg(test)]
 mod sparse_tests;
 mod view;
 use view::{Content, View};

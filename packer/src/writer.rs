@@ -3398,8 +3398,8 @@ pub fn write_archive(
         .try_reserve_exact(work.len())
         .map_err(|_| limit_error("unable to reserve Snapshot table"))?;
     let mut seen_identities = HashMap::<[u8; 32], u32>::new();
-    // (application, snapshot type, version) -> identity, for pending targets.
-    let mut written = HashMap::<(u32, u8, u32), [u8; 32]>::new();
+    // Exact application/Program/type/version for in-write dependency targets.
+    let mut written = HashMap::<(u32, Option<u64>, u8, u32), [u8; 32]>::new();
     for mut snapshot in work.drain(..) {
         cancelled(options)?;
         let root = std::mem::replace(&mut snapshot.source.root, DirectoryInput::empty());
@@ -3454,10 +3454,11 @@ pub fn write_archive(
         let mut source = snapshot.source;
         let mut resolved_any = false;
         for dependency in &mut source.dependencies {
-            if let Some((kind, version)) = pending_dependency(&dependency.target_snapshot_identity)
+            if let Some((program, kind, version)) =
+                pending_dependency(&dependency.target_snapshot_identity)
             {
                 dependency.target_snapshot_identity = *written
-                    .get(&(snapshot.app_index, kind, version))
+                    .get(&(snapshot.app_index, program, kind, version))
                     .ok_or_else(|| {
                         invalid("pending dependency names no snapshot written before it")
                     })?;
@@ -3480,6 +3481,7 @@ pub fn write_archive(
             written.insert(
                 (
                     snapshot.app_index,
+                    source.program_id,
                     source.snapshot_type as u8,
                     source.numeric_version,
                 ),
@@ -3860,22 +3862,35 @@ pub fn write_archive(
 }
 
 /// Dependency target for a snapshot written earlier in the same write, whose
-/// identity is not known yet: the same application's snapshot of this type
-/// and version. The writer replaces it with that snapshot's identity.
-pub(crate) fn pending_dependency_target(snapshot_type: SnapshotType, version: u32) -> [u8; 32] {
+/// identity is not known yet: the exact application/Program/type/version.
+/// The writer replaces it with that snapshot's identity.
+pub(crate) fn pending_dependency_target(
+    snapshot_type: SnapshotType,
+    version: u32,
+    program: Option<u64>,
+) -> [u8; 32] {
     let mut target = [0u8; 32];
     target[..16].copy_from_slice(b"NX-PENDING-SNAP\0");
     target[16] = snapshot_type as u8;
     target[17..21].copy_from_slice(&version.to_le_bytes());
+    if let Some(program) = program {
+        target[21..29].copy_from_slice(&program.to_le_bytes());
+        target[29] = 1;
+    }
     target
 }
-fn pending_dependency(target: &[u8; 32]) -> Option<(u8, u32)> {
-    (target[..16] == *b"NX-PENDING-SNAP\0" && target[21..] == [0; 11]).then(|| {
-        (
-            target[16],
-            u32::from_le_bytes(target[17..21].try_into().unwrap()),
-        )
-    })
+fn pending_dependency(target: &[u8; 32]) -> Option<(Option<u64>, u8, u32)> {
+    (target[..16] == *b"NX-PENDING-SNAP\0"
+        && target[29] <= 1
+        && target[30..] == [0; 2]
+        && (target[29] == 1 || target[21..29] == [0; 8]))
+        .then(|| {
+            (
+                (target[29] == 1).then(|| u64::from_le_bytes(target[21..29].try_into().unwrap())),
+                target[16],
+                u32::from_le_bytes(target[17..21].try_into().unwrap()),
+            )
+        })
 }
 
 /// First byte of the Data region; the two header slots live below it.

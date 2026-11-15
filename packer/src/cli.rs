@@ -1112,7 +1112,7 @@ fn meta_kind(t: native::ContentMetaType) -> Option<&'static str> {
     match t {
         native::ContentMetaType::Application => Some("base"),
         native::ContentMetaType::Patch => Some("update"),
-        native::ContentMetaType::AddOnContent => Some("dlc"),
+        native::ContentMetaType::AddOnContent | native::ContentMetaType::DataPatch => Some("dlc"),
         _ => None,
     }
 }
@@ -1158,6 +1158,51 @@ fn print_scan(inv: &native::Inventory) {
     }
 }
 /// A native DLC snapshot keeps its title ID in the Meta NCA header (0x210).
+// Read only bounded Meta-NCA header/PFS ranges from an already verified NX.
+// The Meta NCA header names the patch title; its CNMT supplies the DLC DataId.
+struct SnapshotMetaReader<'a> {
+    archive: &'a Path,
+    snapshot: [u8; 32],
+    name: &'a str,
+    size: u64,
+    position: u64,
+    options: &'a WriterOptions,
+}
+impl std::io::Read for SnapshotMetaReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = out
+            .len()
+            .min(self.size.saturating_sub(self.position) as usize);
+        if n == 0 {
+            return Ok(0);
+        }
+        read_snapshot_file_range(
+            self.archive,
+            self.snapshot,
+            self.name,
+            self.position,
+            &mut out[..n],
+            self.options,
+        )
+        .map_err(std::io::Error::other)?;
+        self.position += n as u64;
+        Ok(n)
+    }
+}
+impl std::io::Seek for SnapshotMetaReader<'_> {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        let next = match from {
+            std::io::SeekFrom::Start(n) => n as i128,
+            std::io::SeekFrom::End(n) => self.size as i128 + n as i128,
+            std::io::SeekFrom::Current(n) => self.position as i128 + n as i128,
+        };
+        if next < 0 || next > self.size as i128 {
+            return Err(std::io::Error::other("Meta NCA seek outside stored file"));
+        }
+        self.position = next as u64;
+        Ok(self.position)
+    }
+}
 fn dlc_title(path: &Path, s: &SnapshotSummary, options: &WriterOptions) -> u64 {
     if let Some(id) = s.addon_title_id.or(s.program_id) {
         return id;
@@ -1169,10 +1214,20 @@ fn dlc_title(path: &Path, s: &SnapshotSummary, options: &WriterOptions) -> u64 {
         .iter()
         .filter(|f| f.path.ends_with(".cnmt.nca") && f.size >= 0x400)
         .find_map(|f| {
-            let mut header = [0u8; 0x220];
-            read_snapshot_file_range(path, s.identity, &f.path, 0, &mut header, options).ok()?;
-            (&header[0x200..0x203] == b"NCA" || &header[0x200..0x204] == b"DNCA")
-                .then(|| u64::from_le_bytes(header[0x210..0x218].try_into().unwrap()))
+            let mut reader = SnapshotMetaReader {
+                archive: path,
+                snapshot: s.identity,
+                name: &f.path,
+                size: f.size,
+                position: 0,
+                options,
+            };
+            let mut source = native::container::Source::new(&mut reader, f.size);
+            let nca = native::nca::parse_nca(&mut source, 0, f.size).ok()?;
+            let mut limits = native::InventoryOptions::default();
+            limits.max_meta_bytes = limits.max_meta_bytes.min(options.max_memory_bytes / 64);
+            let meta = native::nca::read_content_meta(&mut source, &nca, &limits).ok()?;
+            Some(meta.data_id.unwrap_or(meta.title_id))
         })
         .unwrap_or(0)
 }

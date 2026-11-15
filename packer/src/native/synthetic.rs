@@ -42,6 +42,10 @@ pub struct TitleSpec {
     pub required_application_version: u32,
     /// Extended-header ApplicationId (Patch/AddOnContent) or PatchId (Application).
     pub related_id: u64,
+    pub data_id: Option<u64>,
+    pub data_patch_id: Option<u64>,
+    pub data_bktr: bool,
+    pub data_owner: Option<u64>,
     /// CNMT ContentMetaPlatform byte.
     pub platform: u8,
     pub program: Option<ProgramSpec>,
@@ -62,6 +66,10 @@ impl TitleSpec {
             version,
             required_application_version: 0,
             related_id: app | 0x800,
+            data_id: None,
+            data_patch_id: None,
+            data_bktr: false,
+            data_owner: None,
             platform: 0,
             program: Some(ProgramSpec {
                 program_id: app,
@@ -98,6 +106,13 @@ impl TitleSpec {
         s
     }
 
+    pub fn data_patch(app: u64, data: u64, patch: u64, version: u32, seed: u8) -> Self {
+        let mut spec = Self::add_on(app, patch, version, seed);
+        spec.meta_type = 0x84;
+        spec.data_id = Some(data);
+        spec
+    }
+
     pub fn add_on(app: u64, dlc: u64, version: u32, seed: u8) -> Self {
         Self {
             meta_type: 0x82,
@@ -105,6 +120,10 @@ impl TitleSpec {
             version,
             required_application_version: 0,
             related_id: app,
+            data_id: None,
+            data_patch_id: None,
+            data_bktr: false,
+            data_owner: None,
             platform: 0,
             program: None,
             extra_programs: Vec::new(),
@@ -456,7 +475,12 @@ pub fn title_entries_custom(
         let image = romfs(&[("dlc.bin".into(), d.clone())]);
         contents.push((
             2,
-            nca(4, spec.title_id, vec![ivfc_section(image, false)], enc),
+            nca(
+                4,
+                spec.data_owner.or(spec.data_id).unwrap_or(spec.title_id),
+                vec![ivfc_section(image, spec.data_bktr)],
+                enc,
+            ),
         ));
     }
     while let Some((_, _, data)) = shared.iter().find(|(index, _, _)| *index == contents.len()) {
@@ -468,7 +492,13 @@ pub fn title_entries_custom(
         };
         contents.push((kind, data.clone()));
     }
-    let ext_size = if spec.meta_type == 0x80 { 0x10 } else { 0x18 };
+    let ext_size = if spec.meta_type == 0x80 {
+        0x10
+    } else if spec.meta_type == 0x84 {
+        0x20
+    } else {
+        0x18
+    };
     let mut cnmt = vec![0u8; 0x20 + ext_size];
     put_u64(&mut cnmt, 0, spec.title_id);
     put_u32(&mut cnmt, 8, spec.version);
@@ -479,6 +509,12 @@ pub fn title_entries_custom(
     put_u64(&mut cnmt, 0x20, spec.related_id);
     if spec.meta_type == 0x82 {
         put_u32(&mut cnmt, 0x28, spec.required_application_version);
+        put_u64(&mut cnmt, 0x30, spec.data_patch_id.unwrap_or(0));
+    }
+    if spec.meta_type == 0x84 {
+        put_u64(&mut cnmt, 0x20, spec.data_id.unwrap());
+        put_u64(&mut cnmt, 0x28, spec.related_id);
+        put_u32(&mut cnmt, 0x30, spec.required_application_version);
     }
     let mut entries = Vec::new();
     for (i, (record_type, mut bytes)) in contents.into_iter().enumerate() {
@@ -506,6 +542,7 @@ pub fn title_entries_custom(
         match spec.meta_type {
             0x80 => "Application",
             0x81 => "Patch",
+            0x84 => "DataPatch",
             _ => "AddOnContent",
         },
         spec.title_id

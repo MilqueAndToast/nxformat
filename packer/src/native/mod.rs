@@ -441,6 +441,10 @@ pub struct ContentMeta {
     /// header's ApplicationId for Patch and AddOnContent.
     pub application_id: u64,
     pub patch_id: Option<u64>,
+    /// Target add-on content ID, present only for native DataPatch metadata.
+    pub data_id: Option<u64>,
+    /// Optional forward link from AddOnContent to its native DataPatch title.
+    pub data_patch_id: Option<u64>,
     pub required_application_version: Option<u32>,
     pub required_system_version: Option<u32>,
     pub contents: Vec<ContentRecord>,
@@ -451,7 +455,7 @@ pub struct ContentMeta {
     /// Program IDs from the Program NCA headers referenced by this meta.
     pub program_ids: Vec<u64>,
     pub programs: Vec<NativeProgram>,
-    /// A referenced Program NCA carries BKTR patch tables.
+    /// A referenced Program or Data NCA carries BKTR patch tables.
     pub requires_base_romfs: bool,
     pub verification: VerificationState,
 }
@@ -878,7 +882,10 @@ pub(crate) fn inspect_entries(
         }
         if !matches!(
             meta.meta_type,
-            ContentMetaType::Application | ContentMetaType::Patch | ContentMetaType::AddOnContent
+            ContentMetaType::Application
+                | ContentMetaType::Patch
+                | ContentMetaType::AddOnContent
+                | ContentMetaType::DataPatch
         ) {
             plannable = false;
             issues.push(Issue::new(
@@ -988,6 +995,63 @@ pub(crate) fn inspect_entries(
                     "ambiguous Control NCA Program/offset association",
                 ));
             }
+            if meta.meta_type == ContentMetaType::DataPatch {
+                if unit
+                    .summary
+                    .sections
+                    .iter()
+                    .any(|section| section.has_patch_info)
+                {
+                    meta.requires_base_romfs = true;
+                }
+                if record.record_type != ContentRecordType::Data {
+                    plannable = false;
+                    issues.push(Issue::new(
+                        Severity::Error,
+                        IssueCode::ContentMismatch,
+                        "DataPatch may contain only Data content records",
+                    ));
+                }
+                if Some(unit.summary.program_id) != meta.data_id
+                    && unit.summary.program_id != meta.title_id
+                {
+                    plannable = false;
+                    issues.push(Issue::new(
+                        Severity::Error,
+                        IssueCode::ContentMismatch,
+                        "DataPatch Data NCA owner matches neither target DataId nor declared DataPatch title",
+                    ));
+                }
+                if unit
+                    .summary
+                    .sections
+                    .iter()
+                    .filter(|section| section.fs_type == 0)
+                    .count()
+                    != 1
+                    || unit
+                        .summary
+                        .sections
+                        .iter()
+                        .any(|section| section.fs_type == 0 && section.hash_type != 3)
+                {
+                    plannable = false;
+                    issues.push(Issue::new(
+                        Severity::Error,
+                        IssueCode::UnsupportedMetaType,
+                        "DataPatch needs one complete IVFC RomFS section in each Data NCA",
+                    ));
+                }
+                if unit
+                    .summary
+                    .sections
+                    .iter()
+                    .any(|section| section.has_patch_info || section.sparse_flattened)
+                {
+                    plannable = false;
+                    issues.push(Issue::new(Severity::Error,IssueCode::UnsupportedMetaType,"Raw BKTR/sparse DataPatch reconstruction is unsupported; supply a complete materialized DLC view"));
+                }
+            }
             match record.record_type {
                 ContentRecordType::Program => {
                     if !meta.program_ids.contains(&unit.summary.program_id) {
@@ -1056,13 +1120,27 @@ pub(crate) fn inspect_entries(
                 _ => {}
             }
             if options.mode == InventoryMode::Strict
-                && matches!(
+                && (matches!(
                     record.record_type,
                     ContentRecordType::Program | ContentRecordType::Control
-                )
+                ) || (meta.meta_type == ContentMetaType::DataPatch
+                    && record.record_type == ContentRecordType::Data))
             {
                 verification.push(verify_unit(src, unit, options));
             }
+        }
+        if meta.meta_type == ContentMetaType::DataPatch
+            && !meta
+                .contents
+                .iter()
+                .any(|record| record.record_type == ContentRecordType::Data)
+        {
+            plannable = false;
+            issues.push(Issue::new(
+                Severity::Error,
+                IssueCode::MissingContent,
+                "DataPatch has no complete Data NCA",
+            ));
         }
         let primary = meta
             .programs
@@ -1143,7 +1221,9 @@ fn verify_unit(src: &mut Source, nca: &ParsedNca, options: &InventoryOptions) ->
             (NcaContentType::Meta | NcaContentType::Program, 1, 2) => {
                 nca.verify_partition(src, i, options)
             }
-            (NcaContentType::Control, 0, 3) => nca.verify_romfs(src, i, options),
+            (NcaContentType::Control | NcaContentType::Data, 0, 3) => {
+                nca.verify_romfs(src, i, options)
+            }
             _ => Ok(VerificationState::NotApplicable),
         };
         states.push(state.unwrap_or_else(|e| VerificationState::Failed(e.message)));
@@ -1376,6 +1456,7 @@ fn associate_inner(
                 ContentMetaType::Application => 0,
                 ContentMetaType::Patch => 1,
                 ContentMetaType::AddOnContent => 2,
+                ContentMetaType::DataPatch => 3,
                 _ => continue,
             };
             seen.entry((type_code, meta.title_id, meta.version, platform as u8))
@@ -1410,6 +1491,8 @@ fn associate_inner(
                 && m.meta.application_id == first.meta.application_id
                 && m.meta.platform_byte == first.meta.platform_byte
                 && m.meta.patch_id == first.meta.patch_id
+                && m.meta.data_id == first.meta.data_id
+                && m.meta.data_patch_id == first.meta.data_patch_id
                 && m.meta.required_application_version == first.meta.required_application_version
                 && m.meta.required_system_version == first.meta.required_system_version
                 && m.meta.contents.len() == first.meta.contents.len()
@@ -1537,6 +1620,25 @@ fn associate_inner(
             .max();
         for d in &app.dlc {
             let m = &meta_of(d).meta;
+            if m.meta_type == ContentMetaType::DataPatch {
+                for base in &app.dlc {
+                    let candidate = &meta_of(base).meta;
+                    if candidate.meta_type == ContentMetaType::AddOnContent
+                        && Some(candidate.title_id) == m.data_id
+                        && candidate
+                            .data_patch_id
+                            .is_some_and(|patch| patch != m.title_id)
+                    {
+                        let mut conflict = Issue::new(
+                            Severity::Error,
+                            IssueCode::ContentMismatch,
+                            "target AddOnContent declares a different DataPatchId",
+                        );
+                        conflict.source = Some(d.source);
+                        issues.push(conflict.title(d.title_id));
+                    }
+                }
+            }
             let mut issue = None;
             if app.bases.is_empty() {
                 issue = Some(Issue::new(
@@ -1783,7 +1885,7 @@ impl Inventory {
         json::inventory_json(self)
     }
 
-    /// Build the converter plan. Only Switch 1 Application/Patch/AddOnContent
+    /// Build the converter plan. Only Switch 1 Application/Patch/AddOnContent and complete DataPatch
     /// metas whose content set resolved completely are planned; everything
     /// else is listed in [`ImportPlan::blocked`] with its reasons.
     pub fn plan(&self) -> ImportPlan {

@@ -112,6 +112,8 @@ pub(super) fn inventory_json(inv: &Inventory) -> String {
             o.kv_str("generation", &format!("{:?}", c.generation));
             o.kv_raw("plannable", m.plannable);
             o.kv_raw("requires_base_romfs", c.requires_base_romfs);
+            o.kv_opt_str("data_id", c.data_id.map(id).as_deref());
+            o.kv_opt_str("data_patch_id", c.data_patch_id.map(id).as_deref());
             o.kv_opt_str(
                 "required_application_version",
                 c.required_application_version

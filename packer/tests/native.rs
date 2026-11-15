@@ -1523,3 +1523,181 @@ fn dlc_numeric_requirement_binds_to_an_exact_accepted_update() {
     .is_err());
     assert_eq!(original, fs::read(&out).unwrap());
 }
+
+#[test]
+fn complete_datapatch_preserves_native_relationships_and_extracts_updated_dlc() {
+    use nxformat_packer::{
+        cli,
+        conversion::convert_inventory,
+        import::{DeclarationManifest, ImportLimits},
+    };
+    let temp = TempDir::new();
+    let data = APP + 0x1001;
+    let patch_id = APP + 0x1801;
+    let mut app = TitleSpec::application(APP, 10, 1);
+    app.program.as_mut().unwrap().npdm = Some(nxformat_packer::import::synthetic::npdm(
+        APP,
+        nxformat_packer::import::structures::NpdmProfile::MetaAcid2048V1,
+    ));
+    let mut base = TitleSpec::add_on(APP, data, 0, 2);
+    base.data_patch_id = Some(patch_id);
+    let mut patch = TitleSpec::data_patch(APP, data, patch_id, 7, 3);
+    patch.required_application_version = 5;
+    let mut entries = title_entries(&app);
+    entries.extend(title_entries(&base));
+    entries.extend(title_entries(&patch));
+    let bytes = dnsp(&entries);
+    let input = temp.write("complete.nsp", &bytes);
+    let inv = nxformat_packer::native::associate(vec![inspect_source(&input, &strict())]);
+    let meta = &inv.sources[0]
+        .metas
+        .iter()
+        .find(|m| m.meta.meta_type == ContentMetaType::DataPatch)
+        .unwrap()
+        .meta;
+    assert_eq!(meta.application_id, APP);
+    assert_eq!(meta.data_id, Some(data));
+    assert_eq!(meta.version, 7);
+    assert_eq!(meta.required_application_version, Some(5));
+    assert!(inv.plan().blocked.is_empty(), "{:?}", inv.plan().blocked);
+    let output = temp.path().join("output.nx");
+    convert_inventory(
+        &inv,
+        &output,
+        &strict(),
+        IntegrityPolicy::Strict,
+        &WriterOptions::default(),
+    )
+    .unwrap();
+    let summary =
+        inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+    assert_eq!(summary.applications[0].snapshots.len(), 3);
+    let patched = summary.applications[0]
+        .snapshots
+        .iter()
+        .find(|s| s.numeric_version == 7)
+        .unwrap();
+    assert_eq!(patched.snapshot_type, SnapshotType::Dlc);
+    assert!(patched.program_id.is_none());
+    assert_eq!(patched.dependencies.len(), 1);
+    let extracted = temp.path().join("extracted");
+    cli::run(
+        vec![
+            "extract".into(),
+            output.to_string_lossy().into_owned(),
+            extracted.to_string_lossy().into_owned(),
+            "--no-restore".into(),
+        ],
+        None,
+        None,
+    )
+    .unwrap();
+    let manifest = DeclarationManifest::read(
+        fs::read(extracted.join("extracted.nximport"))
+            .unwrap()
+            .as_slice(),
+        &ImportLimits::default(),
+    )
+    .unwrap();
+    let snapshot = manifest
+        .snapshots
+        .iter()
+        .find(|s| s.numeric_version == 7)
+        .unwrap();
+    assert_eq!(
+        fs::read(extracted.join(&snapshot.root).join("romfs/dlc.bin")).unwrap(),
+        vec![3; 8192]
+    );
+    assert_eq!(snapshot.addon_title_id, Some(data));
+    let reversible = temp.path().join("reversible");
+    cli::run(
+        vec![
+            "extract".into(),
+            output.to_string_lossy().into_owned(),
+            reversible.to_string_lossy().into_owned(),
+            "--require-restore".into(),
+        ],
+        None,
+        None,
+    )
+    .unwrap();
+    let restored = temp.path().join("restored.nx");
+    cli::run(
+        vec![
+            "pack-tree".into(),
+            reversible.to_string_lossy().into_owned(),
+            restored.to_string_lossy().into_owned(),
+        ],
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(fs::read(restored).unwrap(), fs::read(&output).unwrap());
+    let recipe_output = temp.path().join("recipe.nx");
+    cli::run(
+        vec![
+            "pack".into(),
+            input.to_string_lossy().into_owned(),
+            recipe_output.to_string_lossy().into_owned(),
+            "--recipe".into(),
+            "--paranoid".into(),
+        ],
+        None,
+        None,
+    )
+    .unwrap();
+    cli::run(
+        vec![
+            "check-recipe".into(),
+            recipe_output.to_string_lossy().into_owned(),
+        ],
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(fs::read(input).unwrap(), bytes);
+}
+
+#[test]
+fn datapatch_rejects_base_dependent_data_wrong_owner_and_conflicting_forward_link() {
+    for case in 0..5 {
+        let temp = TempDir::new();
+        let data = APP + 0x1001;
+        let patch_id = APP + 0x1801;
+        let mut patch = TitleSpec::data_patch(APP, data, patch_id, 7, 3);
+        if case == 0 {
+            patch.data_bktr = true;
+        }
+        let mut base = TitleSpec::add_on(APP, data, 0, 2);
+        base.data_patch_id = Some(if case == 2 { patch_id + 1 } else { patch_id });
+        if case == 4 {
+            patch.data = None;
+        }
+        let mut entries = title_entries(&patch);
+        if case == 3 {
+            let data = entries.iter_mut().find(|(_, b)| b[0x205] == 4).unwrap();
+            let at = data.1.windows(64).position(|b| b == [3u8; 64]).unwrap();
+            data.1[at] ^= 1;
+        }
+        if case == 1 {
+            // The Data NCA header names another owner even though CNMT hashes
+            // are source labels, not an excuse to accept conflicting identity.
+            let data = entries.iter_mut().find(|(_, b)| b[0x205] == 4).unwrap();
+            data.1[0x210..0x218].copy_from_slice(&(APP + 0x1002).to_le_bytes());
+        }
+        entries.extend(title_entries(&base));
+        let input = temp.write("bad.nsp", &dnsp(&entries));
+        let inv = nxformat_packer::native::associate(vec![inspect_source(
+            &input,
+            &if case == 3 { strict() } else { fast() },
+        )]);
+        let plan = inv.plan();
+        assert!(
+            plan.blocked
+                .iter()
+                .any(|b| b.meta_type == ContentMetaType::DataPatch),
+            "case{case}: {:?}",
+            plan
+        );
+    }
+}

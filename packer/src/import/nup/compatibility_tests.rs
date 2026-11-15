@@ -758,7 +758,7 @@ fn legacy_dlc_keeps_native_marker_under_matching_newer_application() {
 }
 
 #[test]
-fn missing_primary_and_data_patch_give_specific_reexport_instructions() {
+fn supported_datapatch_does_not_hide_a_missing_primary_executable() {
     let dir = work("data-patch-blocker");
     let input = dir.join("source.nup");
     let mut patch = vec![0u8; 0x40];
@@ -784,8 +784,248 @@ fn missing_primary_and_data_patch_give_specific_reexport_instructions() {
     )
     .unwrap_err()
     .to_string();
-    assert!(error.contains("package-1 contains DataPatch"));
+    assert!(!error.contains("contains DataPatch metadata"));
     assert!(error.contains("No primary executable"));
     assert!(error.contains("Re-export"));
     assert!(!error.contains("conflicting CNMT applications"));
+}
+
+fn data_patch_cnmt(data: u64, patch: u64, version: u32, minimum: u32) -> Vec<u8> {
+    let mut b = vec![0u8; 0x78];
+    b[..8].copy_from_slice(&patch.to_le_bytes());
+    b[8..12].copy_from_slice(&version.to_le_bytes());
+    b[0xc] = 0x84;
+    b[0xd] = 1;
+    b[0xe] = 0x20;
+    b[0x10] = 1;
+    b[0x40 + 0x36] = 2;
+    b[0x40 + 32..0x40 + 48].fill(0x5a);
+    b[0x20..0x28].copy_from_slice(&data.to_le_bytes());
+    b[0x28..0x30].copy_from_slice(&APP.to_le_bytes());
+    b[0x30..0x34].copy_from_slice(&minimum.to_le_bytes());
+    b
+}
+
+#[test]
+fn materialized_datapatch_retains_dlc_target_patch_metadata_and_version() {
+    let dir = work("datapatch-materialized");
+    let source = dir.join("source.nup");
+    let map = dir.join("source.nxnupmap");
+    let mut primary = base(APP);
+    primary.version = 10;
+    let mut auxiliary = base(AUX);
+    auxiliary.version = 10;
+    let mut program_meta = cnmt();
+    program_meta[8..12].copy_from_slice(&10u32.to_le_bytes());
+    let mut base_meta = vec![0u8; 0x38];
+    base_meta[..8].copy_from_slice(&(APP + 0x1001).to_le_bytes());
+    base_meta[0xc] = 0x82;
+    base_meta[0xd] = 1;
+    base_meta[0xe] = 0x18;
+    base_meta[0x20..0x28].copy_from_slice(&APP.to_le_bytes());
+    base_meta[0x30..0x38].copy_from_slice(&(APP + 0x1801).to_le_bytes());
+    let mut original = addon(APP);
+    original.romfs = Some(vec![Node::File("removed.bin", b"old content".to_vec())]);
+    let mut patch = addon(APP);
+    patch.romfs = Some(vec![Node::File(
+        "new.bin",
+        b"complete updated view".to_vec(),
+    )]);
+    let native = data_patch_cnmt(APP + 0x1001, APP + 0x1801, 7, 5);
+    let bytes = build_with_extras(
+        &[auxiliary, primary, original, patch],
+        true,
+        &[
+            (
+                1,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File("Application.cnmt", program_meta)],
+                )],
+            ),
+            (
+                2,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File("AddOnContent.cnmt", base_meta)],
+                )],
+            ),
+            (
+                3,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File("DataPatch.cnmt", native.clone())],
+                )],
+            ),
+        ],
+    );
+    fs::write(&source, &bytes).unwrap();
+    let limits = ImportLimits::default();
+    let token = crate::CancellationToken::default();
+    let text = generate_nup_mapping(&source, &limits, &token).unwrap();
+    assert!(text.contains("dlc\t7\tcomplete"));
+    assert!(text.contains("addon\tpkg-3\t0100000012341001"));
+    assert!(
+        text.contains("dependency\tpkg-3\trequires\tpkg-0")
+            || text.contains("dependency\tpkg-3\trequires\tpkg-1")
+    );
+    fs::write(&map, &text).unwrap();
+    for stream in [false, true] {
+        let output = dir.join(format!("{stream}.nx"));
+        convert_nup(
+            &source,
+            &output,
+            &NupOptions {
+                mapping: Some(map.clone()),
+                platform: Some(Platform::Switch2),
+                stream,
+                ..Default::default()
+            },
+            &limits,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            check_nup_with_mapping(
+                &source,
+                &output,
+                false,
+                &map,
+                &limits,
+                &WriterOptions::default()
+            )
+            .unwrap()
+            .snapshots,
+            4
+        );
+        let summary = crate::inspect_archive(
+            &output,
+            &WriterOptions::default(),
+            crate::IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        let patched = summary.applications[0]
+            .snapshots
+            .iter()
+            .find(|s| s.snapshot_type == SnapshotType::Dlc && s.numeric_version == 7)
+            .unwrap();
+        assert_eq!(patched.addon_title_id, Some(APP + 0x1001));
+        assert!(patched.program_id.is_none());
+        assert_eq!(patched.dependencies.len(), 1);
+        let files = crate::inspect_snapshot_files(
+            &output,
+            patched.identity,
+            &WriterOptions::default(),
+            crate::IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        assert!(files.iter().any(|f| f.path == "romfs/new.bin"));
+        assert!(!files.iter().any(|f| f.path == "romfs/removed.bin"));
+        let extracted = dir.join(format!("extracted-{stream}"));
+        crate::cli::run(
+            vec![
+                "extract".into(),
+                output.to_string_lossy().into_owned(),
+                extracted.to_string_lossy().into_owned(),
+                "--no-restore".into(),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        let manifest = DeclarationManifest::read(
+            fs::read(extracted.join("extracted.nximport"))
+                .unwrap()
+                .as_slice(),
+            &limits,
+        )
+        .unwrap();
+        let snapshot = manifest
+            .snapshots
+            .iter()
+            .find(|s| s.numeric_version == 7)
+            .unwrap();
+        assert_eq!(
+            fs::read(
+                extracted
+                    .join(&snapshot.root)
+                    .join("data/__nup_root__/meta/DataPatch.cnmt")
+            )
+            .unwrap(),
+            native
+        );
+    }
+    assert_eq!(fs::read(&source).unwrap(), bytes);
+}
+
+#[test]
+fn datapatch_mapping_rejects_bad_target_minimum_version_and_forward_link() {
+    let dir = work("datapatch-reject");
+    let source = dir.join("source.nup");
+    for case in 0..5 {
+        let mut native = data_patch_cnmt(
+            if case == 0 {
+                APP + 0x1002
+            } else {
+                APP + 0x1001
+            },
+            APP + 0x1801,
+            if case == 4 { 0 } else { 7 },
+            if case == 1 { 5 } else { 0 },
+        );
+        if case == 2 {
+            native.truncate(0x30);
+        }
+        let mut base_meta = vec![0u8; 0x38];
+        base_meta[..8].copy_from_slice(&(APP + 0x1001).to_le_bytes());
+        base_meta[0xc] = 0x82;
+        base_meta[0xd] = 1;
+        base_meta[0xe] = 0x18;
+        base_meta[0x20..0x28].copy_from_slice(&APP.to_le_bytes());
+        base_meta[0x30..0x38].copy_from_slice(
+            &(if case == 3 {
+                APP + 0x1802
+            } else {
+                APP + 0x1801
+            })
+            .to_le_bytes(),
+        );
+        let bytes = build_with_extras(
+            &[base(APP), base(AUX), addon(APP), addon(APP)],
+            true,
+            &[
+                (
+                    0,
+                    vec![Node::Dir(
+                        "meta",
+                        vec![Node::File("Application.cnmt", cnmt())],
+                    )],
+                ),
+                (
+                    2,
+                    vec![Node::Dir(
+                        "meta",
+                        vec![Node::File("AddOnContent.cnmt", base_meta)],
+                    )],
+                ),
+                (
+                    3,
+                    vec![Node::Dir(
+                        "meta",
+                        vec![Node::File("DataPatch.cnmt", native)],
+                    )],
+                ),
+            ],
+        );
+        fs::write(&source, bytes).unwrap();
+        assert!(
+            generate_nup_mapping(
+                &source,
+                &ImportLimits::default(),
+                &crate::CancellationToken::default()
+            )
+            .is_err(),
+            "case {case}"
+        );
+    }
 }

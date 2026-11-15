@@ -696,10 +696,10 @@ pub(super) fn prepare(
     let target = &addition.metas[0].meta;
     let kind = match target.meta_type {
         ContentMetaType::Patch => SnapshotType::Update,
-        ContentMetaType::AddOnContent => SnapshotType::Dlc,
+        ContentMetaType::AddOnContent | ContentMetaType::DataPatch => SnapshotType::Dlc,
         _ => {
             return Err(invalid(
-                "native addition must select a Patch or AddOnContent CNMT",
+                "native addition must select a Patch, AddOnContent or complete DataPatch CNMT",
             ))
         }
     };
@@ -794,7 +794,10 @@ pub(super) fn prepare(
             if report.issues.iter().any(|i| i.severity == Severity::Error)
                 || report.metas.len() != 1
                 || report.metas[0].meta.meta_content_id != Some(old.snapshot.content_id)
-                || report.metas[0].meta.meta_type != ContentMetaType::AddOnContent
+                || !matches!(
+                    report.metas[0].meta.meta_type,
+                    ContentMetaType::AddOnContent | ContentMetaType::DataPatch
+                )
                 || report.metas[0].meta.application_id != key.1
                 || report.metas[0].meta.version != old.snapshot.version
                 || report.metas[0].units.len() != report.units.len()

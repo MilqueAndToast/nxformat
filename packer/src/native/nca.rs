@@ -451,6 +451,7 @@ pub(crate) fn parse_cnmt(b: &[u8]) -> Result<ContentMeta, NativeError> {
         // AddOnContent grew from 0x10 to 0x18 bytes in 15.0.0 (DataPatchId).
         ContentMetaType::Application | ContentMetaType::AddOnContent => 0x10,
         ContentMetaType::Patch => 0x18,
+        ContentMetaType::DataPatch => 0x20,
         _ => 0,
     };
     if ext.len() < need {
@@ -466,6 +467,7 @@ pub(crate) fn parse_cnmt(b: &[u8]) -> Result<ContentMeta, NativeError> {
             ),
             ContentMetaType::Patch => (u64_at(ext, 0), None, None, Some(u32_at(ext, 0x08))),
             ContentMetaType::AddOnContent => (u64_at(ext, 0), None, Some(u32_at(ext, 0x08)), None),
+            ContentMetaType::DataPatch => (u64_at(ext, 8), None, Some(u32_at(ext, 0x10)), None),
             _ => (title_id, None, None, None),
         };
     if title_id == 0 || application_id == 0 {
@@ -473,6 +475,20 @@ pub(crate) fn parse_cnmt(b: &[u8]) -> Result<ContentMeta, NativeError> {
             "CNMT has a zero title or application ID",
         ));
     }
+    let data_id = (meta_type == ContentMetaType::DataPatch).then(|| u64_at(ext, 0));
+    if data_id.is_some_and(|id| {
+        id == 0 || id == title_id || !crate::import::addon_belongs_to(id, application_id)
+    }) {
+        return Err(NativeError::invalid("DataPatch target DataId is zero, self-referential or outside its application's add-on range"));
+    }
+    let data_patch_id = if meta_type == ContentMetaType::AddOnContent && ext.len() >= 0x18 {
+        match u64_at(ext, 0x10) {
+            0 => None,
+            id => Some(id),
+        }
+    } else {
+        None
+    };
     let generation = match platform_byte {
         0 => NativeGeneration::Switch1,
         1 => NativeGeneration::Switch2,
@@ -503,6 +519,8 @@ pub(crate) fn parse_cnmt(b: &[u8]) -> Result<ContentMeta, NativeError> {
         generation,
         application_id,
         patch_id,
+        data_id,
+        data_patch_id,
         required_application_version,
         required_system_version,
         contents,
@@ -698,4 +716,39 @@ pub(crate) fn read_build_id(
     let mut id = [0u8; 32];
     id.copy_from_slice(&h[0x40..0x60]);
     Ok(Some(id))
+}
+
+#[cfg(test)]
+mod datapatch_tests {
+    use super::*;
+    fn fixture(ext: usize) -> Vec<u8> {
+        let mut b = vec![0u8; 0x20 + ext];
+        b[..8].copy_from_slice(&0x0100000000011801u64.to_le_bytes());
+        b[0xc] = 0x84;
+        b[0xe..0x10].copy_from_slice(&(ext as u16).to_le_bytes());
+        if ext >= 0x20 {
+            b[0x20..0x28].copy_from_slice(&0x0100000000011001u64.to_le_bytes());
+            b[0x28..0x30].copy_from_slice(&0x0100000000010000u64.to_le_bytes());
+            b[0x30..0x34].copy_from_slice(&55u32.to_le_bytes());
+        }
+        b
+    }
+    #[test]
+    fn datapatch_extended_header_decodes_independent_ids_and_minimum() {
+        let m = parse_cnmt(&fixture(0x20)).unwrap();
+        assert_eq!(m.application_id, 0x0100000000010000);
+        assert_eq!(m.data_id, Some(0x0100000000011001));
+        assert_eq!(m.title_id, 0x0100000000011801);
+        assert_eq!(m.required_application_version, Some(55));
+        assert_eq!(m.required_system_version, None);
+        assert_eq!(m.patch_id, None);
+        for size in 0..0x20 {
+            assert!(parse_cnmt(&fixture(size)).is_err());
+        }
+        for id in [0, 0x0100000000011801, 0x0100000000021001] {
+            let mut b = fixture(0x20);
+            b[0x20..0x28].copy_from_slice(&u64::to_le_bytes(id));
+            assert!(parse_cnmt(&b).is_err());
+        }
+    }
 }

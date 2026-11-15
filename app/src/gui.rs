@@ -401,6 +401,54 @@ fn title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn complete_native_datapatch_is_discovered_and_converted_with_its_application() {
+        use super::*;
+        use nxformat_packer::native::synthetic::{dnsp, title_entries, TitleSpec};
+        let app_id = 0x0100000000610000u64;
+        let data = app_id + 0x1001;
+        let patch = data + 0x800;
+        let dir = std::env::temp_dir().join(format!(
+            "nxconvert-data-patch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("complete.nsp");
+        let mut base = TitleSpec::add_on(app_id, data, 0, 2);
+        base.data_patch_id = Some(patch);
+        let mut entries = title_entries(&TitleSpec::application(app_id, 0, 1));
+        entries.extend(title_entries(&base));
+        entries.extend(title_entries(&TitleSpec::data_patch(
+            app_id, data, patch, 7, 3,
+        )));
+        std::fs::write(&source, dnsp(&entries)).unwrap();
+        let mut app = App {
+            sources: discovery::scan(vec![source], &CancellationToken::default()).unwrap(),
+            ..Default::default()
+        };
+        assert!(app.sources[0].supported);
+        assert_eq!(app.sources[0].contents.len(), 3);
+        assert!(app.sources[0]
+            .contents
+            .iter()
+            .any(|c| c.kind == "dlc" && c.application == app_id && c.version == 7));
+        assert_eq!(app.games().len(), 1);
+        let output = app.games()[0].output.clone().unwrap();
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        cli::run(job.args, None, Some(CancellationToken::default())).unwrap();
+        let summary = nxformat_packer::inspect_archive(
+            output,
+            &nxformat_packer::WriterOptions::default(),
+            nxformat_packer::IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        assert_eq!(summary.applications[0].snapshots.len(), 3);
+    }
     use super::{title_from_path, App, Content, Source};
     use std::path::Path;
 

@@ -464,7 +464,9 @@ pub fn scan(paths: Vec<PathBuf>, token: &CancellationToken) -> Result<Vec<Source
                 let kind = match m.meta.meta_type {
                     native::ContentMetaType::Application => "base",
                     native::ContentMetaType::Patch => "update",
-                    native::ContentMetaType::AddOnContent => "dlc",
+                    native::ContentMetaType::AddOnContent | native::ContentMetaType::DataPatch => {
+                        "dlc"
+                    }
                     _ => continue,
                 };
                 let mut content = Content {

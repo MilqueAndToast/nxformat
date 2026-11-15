@@ -71,9 +71,10 @@ pub fn inspect_nup_spec(
                     meta.meta_type,
                     crate::native::ContentMetaType::Application
                         | crate::native::ContentMetaType::Patch
+                        | crate::native::ContentMetaType::DataPatch
                 ) && meta.version != p.version
                 {
-                    violations.push(format!("package-{i} declares version {} but its executable CNMT records version {}; NUP v1 §3.1.1 requires the original numeric content version.",p.version,meta.version));
+                    violations.push(format!("package-{i} declares version {} but its native CNMT records version {}; NUP v1 §3.1.1 requires the original numeric content version.",p.version,meta.version));
                 }
             }
         }

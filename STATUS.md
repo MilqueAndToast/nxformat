@@ -95,3 +95,26 @@ ignored), plus 14 GUI tests. Native picker verification was blocked by invalid
 computer-use window geometry; automated behavior is tested. No gameplay claim.
 See TESTING.md and docs/NUP-COMPATIBILITY.md for precise evidence and rules.
 Changes are local pending PM review; no source push or release is authorized yet.
+
+## DataPatch complete-view support — 2026-11-15
+
+Unreleased source supports complete materialized NUP DataPatch views and complete
+Switch 1 native Data NCAs, with typed target DataId/application/patch identities,
+minimum-version requirements and validated forward links. NUP mapping retains
+original labels/CNMT, uses native patch version and target DLC ID, and preserves
+full updated views without guessing overlays. Native conversion preserves raw
+Meta/Data NCAs; extraction identifies DLC by CNMT DataId, not patch title.
+
+Corrected same-write dependency resolution to include Program ID, so DLC requiring
+an exact primary snapshot cannot attach to an auxiliary of the same version.
+GUI native discovery includes supported DataPatch records. No NX wire change.
+
+280 packer tests (one ignored) and 15 GUI tests passed; coverage includes native
+and materialized conversion, artificial CTR decryption, source comparison,
+strict verification, extraction, exact restoration/recipe replay and rejection
+of inconsistent/incomplete inputs. See TESTING.md and docs/DATAPATCH.md.
+Raw BKTR/sparse DataPatch reconstruction remains unsupported and is reported
+explicitly. No real DataPatch conversion/gameplay or new manual UI pass claimed.
+The current real NUP is recognized past DataPatch parsing but still lacks its
+main executable. No source content is fabricated or dropped. Existing NUP spec
+warnings and opt-in remain mandatory. No source push or release authorized yet.

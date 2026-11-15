@@ -1442,6 +1442,13 @@ fn stage_nup_bounded(
         ));
         if dlc {
             text.push_str(&format!("addon\t{key}\t{}\n", hex16(p.title_id)));
+            if let Some(d) = mapped {
+                for (kind, target) in &d.dependencies {
+                    if *kind == crate::DependencyKind::Requires {
+                        text.push_str(&format!("dependency\t{key}\trequires\t{target}\n"));
+                    }
+                }
+            }
         }
         if kind == "update" {
             text.push_str(&format!("dependency\t{key}\trequired-base\t{base_key}\n"));
@@ -1737,6 +1744,37 @@ fn check_nup_impl(
                     .any(|d| d.target_snapshot_identity == b)
                 {
                     return Err(bad(&format!("{what}: does not require the base snapshot")));
+                }
+            }
+        }
+        if let Some(d) = mapped {
+            for (kind, key) in &d.dependencies {
+                let target = &mapping
+                    .as_ref()
+                    .unwrap()
+                    .manifest
+                    .snapshots
+                    .iter()
+                    .find(|b| &b.key == key)
+                    .unwrap();
+                let expected = summary
+                    .applications
+                    .iter()
+                    .filter(|a| {
+                        a.application_id == target.application_id && a.platform == target.platform
+                    })
+                    .flat_map(|a| &a.snapshots)
+                    .find(|b| {
+                        b.program_id == target.program_id
+                            && b.snapshot_type == target.snapshot_type
+                            && b.numeric_version == target.numeric_version
+                            && b.addon_title_id == target.addon_title_id
+                    })
+                    .ok_or_else(|| bad("mapped dependency snapshot is absent"))?;
+                if !snapshot.dependencies.iter().any(|dep| {
+                    dep.kind == *kind && dep.target_snapshot_identity == expected.identity
+                }) {
+                    return Err(bad("mapped dependency identity differs from archive"));
                 }
             }
         }

@@ -67,8 +67,9 @@ and DLC title/version match and it has no executable content. Its original
 platform marker and bytes remain preserved. Executable platform conflicts,
 unrelated DLC and newer-platform DLC attached to older-platform programs still
 fail validation. A container with only auxiliary programs needs a new export
-including its main executable. DataPatch composition remains unsupported; export
-complete DLC views with their AddOnContent metadata instead.
+including its main executable. Complete materialized DataPatch views are now
+supported in source builds; raw base-dependent patch reconstruction remains
+unsupported. [DataPatch scope](DATAPATCH.md).
 
 This representation uses the existing [NX catalog rules](SPEC.md#4-fast-catalog):
 platform belongs to the application, native executable IDs belong to Program
@@ -76,8 +77,9 @@ rows, and add-on-title DLC has no invented executable association. The importer
 chooses the application execution platform from validated executable metadata;
 the NX format itself does not guarantee runtime compatibility of older DLC.
 Native DataPatch is a documented [CNMT type](https://switchbrew.org/wiki/CNMT#DataPatchMetaExtendedHeader),
-not evidence of corruption. It needs a distinct patch implementation and cannot
-be relabelled as ordinary DLC. An auxiliary-only container may contain valid
+not evidence of corruption. Its own CNMT type and patch identity are preserved;
+the complete updated DLC view uses its native target DataId and patch version.
+It cannot be relabelled as AddOnContent. An auxiliary-only container may contain valid
 auxiliary content; it is not a complete main-game export for this workflow.
 
 Generation errors appear on the affected source card with the reason and next
@@ -99,7 +101,10 @@ complete `materialized-v1` views. Each executable needs its actual NPDM Program
 ID, matching NPDM profile and explicit primary/auxiliary role. Exactly one
 Program ID may be primary. Updates require an earlier base of that same Program
 ID through `dependency<TAB>update-key<TAB>required-base<TAB>base-key`.
-DLC must retain its source title/version and have no executable Program.
+Ordinary DLC retains its source title/version and has no executable Program.
+DataPatch uses its native target DataId and patch version; differing NUP version
+labels are reported by preflight and retained in provenance. A nonzero required
+application version needs a `requires` dependency on a matching primary snapshot.
 
 Optional `nacp` and `icon` records select original `control/` paths, including
 subdirectories. For example, `nacp<TAB>main<TAB>control/Acd_1/control.nacp`
