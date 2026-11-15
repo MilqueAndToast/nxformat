@@ -5,7 +5,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/fab918/nxformat" height="20" align="top"></a>
   <a href="https://github.com/fab918/nxformat/actions/workflows/ci.yml"><img alt="Upstream tests and conformance" src="https://github.com/fab918/nxformat/actions/workflows/ci.yml/badge.svg?branch=main" height="20" align="top"></a>
-  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.3-local-decryption.5"><img alt="Local Decryption 1.0.3.5" src="https://img.shields.io/badge/release-1.0.3.5-blue" height="20" align="top"></a>
+  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.3e"><img alt="Local Decryption 1.0.3e" src="https://img.shields.io/badge/release-1.0.3e-blue" height="20" align="top"></a>
   <img alt="Switch 1 and Switch 2" src="https://img.shields.io/badge/Switch-1%20%26%202-337ab7" height="20" align="top">
   <img alt="C++17 reader" src="https://img.shields.io/badge/reader-C%2B%2B17-00599C" height="20" align="top">
 </p>
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.3-local-decryption.5"><strong>Download NXConvert — Local Decryption 1.0.3.5</strong></a>
+  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.3e"><strong>Download NXConvert — Local Decryption 1.0.3e</strong></a>
   &nbsp;·&nbsp;
   <a href="#performance-nx-vs-nup">NX vs NUP</a>
   &nbsp;·&nbsp;
@@ -67,8 +67,10 @@ Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Already-
 
 ## Quick start
 
-**The current source includes upstream NXConvert 1.0.3** and writes NX archives with separate header pages. The existing NX wire formats are unchanged. Local Decryption 1.0.3.5 adds batch NUP mapping with automatic cleanup, scrollable compatibility warnings, and existing-output detection with queue skipping.
-Download [Local Decryption 1.0.3.5 for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/download/v1.0.3-local-decryption.5/NXConvert-Local-Decryption-1.0.3.5-Windows-x64.zip)
+**The current source includes upstream NXConvert 1.0.3** and writes NX archives with separate header pages. The existing NX wire formats are unchanged. Local Decryption 1.0.3e adds batch NUP mapping with automatic cleanup, scrollable compatibility warnings, and existing-output detection with queue skipping.
+Download [Local Decryption 1.0.3e for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/download/v1.0.3e/NXConvert-Local-Decryption-1.0.3e-Windows-x64.zip)
+
+Fork versions follow the upstream release plus a letter (`1.0.3a`, `1.0.3b`, …), restarting at `a` when a newer upstream release is merged. See [release versioning](docs/FORK-RELEASES.md).
 from [this fork's releases](https://github.com/MilqueAndToast/nxformat/releases),
 or build from source below. Current fork releases include the Windows app and source only.
 

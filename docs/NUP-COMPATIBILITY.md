@@ -4,7 +4,7 @@ Some NUP producers label multiple executable packages as BASE. This fork can
 import them through an explicit compatibility mapping, preserving each native
 Program ID and NPDM profile under one application, with primary/auxiliary roles,
 per-program updates and separate DLC. Ordinary NUP v1 validation is unchanged.
-Available in Local Decryption 1.0.3.1 and newer.
+Available in Local Decryption 1.0.3a and newer.
 
 NUP 1.0-draft [§3.1.2](https://github.com/a55uka/nup/blob/a4840f06c94ddeb414eea5b33c9704ffe995f11c/SPEC.md#312-package-kinds)
 allows at most one BASE. A source with multiple BASE records is nonconforming

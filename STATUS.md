@@ -18,7 +18,7 @@ layout checks cover small viewports and multiple scales. The Windows build and
 native synthetic-source checks passed at default and minimum window sizes,
 including batch continuation, cancellation, scrolling actions and queue-only
 skip. Physical display-scale changes were not tested. See TESTING.md for
-validation evidence and limits. Release 1.0.3.5 includes this GUI update.
+validation evidence and limits. Release 1.0.3e includes this GUI update.
 
 ## Earlier checkpoints
 
@@ -32,7 +32,7 @@ Ready: implemented, built, and verified on Windows x64. No outstanding blocker f
 - Build instructions: `LOCAL-DECRYPTION.md`; reproducible build/package script: `build-windows.ps1`.
 - Full test matrix and limits: `TESTING.md`.
 - Current executable SHA-256 and exact source revision: `dist-release/NXConvert-Local-Decryption/SHA256SUMS.txt` and `BUILD.txt`.
-- Published checkpoint: [Preview 1](https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.2-local-decryption.1), commit `265fbd07217b3339393de953b242c233f5c81853`. Its public EXE SHA-256 is `4723a243acb5fec9b2d3a940231286bc85ff2d38e1d66f79447f0065993641ad`. That release is unchanged and predates sparse support.
+- Published checkpoint: [Preview 1](https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.2a), commit `265fbd07217b3339393de953b242c233f5c81853`. Its public EXE SHA-256 is `4723a243acb5fec9b2d3a940231286bc85ff2d38e1d66f79447f0065993641ad`. That release is unchanged and predates sparse support.
 
 Implemented: read-only streaming NCA3 AES-XTS header / AES-CTR / CTR-EX decryption, common-ticket and recovered-title.keys support, key-area/titlekek derivation, validated package ranges, GUI local-key selection with automatic rescan and decrypted artwork, CLI key options, explicit decrypted-view recipe semantics. Sparse support adds encrypted mapping-table parsing, logical content counters, zero-filled holes, adjusted NSP/HFS0 sizes and offsets, and the upstream flattened-sparse marker. Public builds remap compiler paths.
 
@@ -46,7 +46,7 @@ Private local fixtures/outputs/logs are under `results/local-decryption/`, which
 
 ## Upstream sync — 2026-11-14
 
-Merged upstream main through `10ad8f5` (NXConvert 1.0.3, native extraction/restoration and recipe-speed improvements). Local-key decryption, sparse NCA mapping, key-aware artwork and explicit decrypted recipe semantics are retained. README links continue to point to the published 1.0.2.2 release; the merged source and locally built `app/target/release/nxconvert.exe` report 1.0.3. No new release was published by this merge.
+Merged upstream main through `10ad8f5` (NXConvert 1.0.3, native extraction/restoration and recipe-speed improvements). Local-key decryption, sparse NCA mapping, key-aware artwork and explicit decrypted recipe semantics are retained. README links continue to point to the published 1.0.2b release; the merged source and locally built `app/target/release/nxconvert.exe` report 1.0.3. No new release was published by this merge.
 
 Validation: full locked packer suite passed (263 tests, one intentionally ignored), 11 GUI tests passed, packer formatting and patch whitespace checks passed, and the Windows release build succeeded. A real encrypted Wargroove NSP converted with paranoid source comparison, passed strict NX verification, extracted with a required restoration recipe, and restored to an NX with an identical SHA-256. The full suite was run outside the sandbox to allow its Windows junction fixture. Test logs and private conversion outputs remain under ignored `results/local-decryption/`.
 
@@ -88,7 +88,7 @@ XC2/XCX generation correctly refused conflicting CNMT relationships. Real genera
 mapping conversion and gameplay were not tested; earlier manual-mapping evidence
 remains separate. See [TESTING.md](TESTING.md) for exact scope.
 
-## Release 1.0.3.1 — 2026-11-14
+## Release 1.0.3a — 2026-11-14
 
 Full release of the upstream 1.0.3 merge, multi-program NUP compatibility, and checked GUI/CLI mapping generation. Includes the verified implementation through `fc9bc2c`. Latest validation: 270 packer tests and 13 GUI tests passed (one intentionally ignored packer test); the packaged CLI generated the XCDE mapping. The preceding compatibility implementation verified all 37,718 XCDE source files after conversion. No additional full real conversion or gameplay claim is made for the generation change.
 

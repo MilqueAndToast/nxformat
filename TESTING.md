@@ -73,7 +73,7 @@ and real-NX contents checks passed. Runtime compatibility remains unresolved;
 no gameplay, real native NSP/XCI DataPatch conversion or new manual UI validation
 is claimed.
 
-## DataPatch support — initial 1.0.3.3 validation, 2026-11-15
+## DataPatch support — initial 1.0.3c validation, 2026-11-15
 
 Unreleased source adds the [documented complete-view subset](docs/DATAPATCH.md).
 The shared CNMT parser decodes target DataId, owning application, patch title,
