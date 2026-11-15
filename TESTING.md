@@ -9,7 +9,7 @@ minimums remain intact. Unresolved requirements are persisted as structured
 review or `--allow-unresolved-nup-requirements` in addition to any NUP conformance
 consent. No satisfying version or exact dependency identity is fabricated.
 
-284 packer tests passed (one intentionally ignored), plus 16 GUI tests. Added
+285 packer tests passed (one intentionally ignored), plus 16 GUI tests. Added
 coverage checks selected native NACP/TLV/control agreement, nonzero launch and
 actual NPDM identity, absent accessibility/targets and conflicting controls;
 unknown, known-zero, too-old and satisfying application versions; unchanged
@@ -18,6 +18,10 @@ unresolved provenance. Existing-map CLI and GUI paths require fresh explicit
 review and carry acknowledgment into conversion. False dependency links and
 display-derived/source-version overrides reject. Native raw-content behavior,
 partial patch refusal and integrity requirements remain unchanged.
+Paranoid comparison also reopens streamed raw/Zstd NUP files through their
+SHA-256-checked reader; both ordinary and mapped DataPatch conversion paths are
+covered. A real validation run exposed the former writer-only reader error;
+failure published no final archive before this correction.
 
 ## DataPatch support — 2026-11-15
 

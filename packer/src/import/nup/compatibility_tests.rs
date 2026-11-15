@@ -1192,7 +1192,10 @@ fn selected_nacp_launch_preserves_unknown_versions_and_rejects_known_conflicts()
     let dir = work("selected-nacp-version");
     let source = dir.join("source.nup");
     let map = dir.join("source.nxnupmap");
-    let limits = ImportLimits::default();
+    let limits = ImportLimits {
+        compare_source_bytes: true,
+        ..ImportLimits::default()
+    };
     let token = crate::CancellationToken::default();
     for known in [None, Some(0), Some(2), Some(10)] {
         let bytes = selected_launch_fixture(known, 0);

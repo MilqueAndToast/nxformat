@@ -297,11 +297,11 @@ impl SourceFile {
     pub(crate) fn open_reader(
         &self,
         token: &crate::CancellationToken,
-    ) -> Result<CheckedReader, WriterError> {
-        if self.nup.is_some() {
-            return Err(invalid("a NUP file is read by the writer only"));
+    ) -> Result<Box<dyn Read>, WriterError> {
+        if let Some(nup) = &self.nup {
+            return nup.reader(token);
         }
-        Ok(CheckedReader {
+        Ok(Box::new(CheckedReader {
             file: self.file()?,
             remaining: self.size,
             expected: self.digest,
@@ -310,7 +310,7 @@ impl SourceFile {
             whole: self.root.is_some(),
             size: self.size,
             token: token.clone(),
-        })
+        }))
     }
     fn input(&self, token: &crate::CancellationToken) -> FileInput {
         use crate::model::FileShare;
@@ -341,14 +341,11 @@ impl SourceFile {
                     return Ok(0);
                 }
                 if self.reader.is_none() {
-                    self.reader = Some(match &self.source.nup {
-                        Some(n) => n.reader(&self.token).map_err(io::Error::other)?,
-                        None => Box::new(
-                            self.source
-                                .open_reader(&self.token)
-                                .map_err(io::Error::other)?,
-                        ),
-                    });
+                    self.reader = Some(
+                        self.source
+                            .open_reader(&self.token)
+                            .map_err(io::Error::other)?,
+                    );
                 }
                 let n = self.reader.as_mut().unwrap().read(b)?;
                 if n == 0 && !b.is_empty() {

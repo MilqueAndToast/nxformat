@@ -23,6 +23,43 @@ fn limits() -> ImportLimits {
 }
 
 #[test]
+fn streamed_raw_and_zstd_nup_support_paranoid_source_comparison() {
+    for compressed in [false, true] {
+        let dir = work(if compressed {
+            "paranoid-zstd"
+        } else {
+            "paranoid-raw"
+        });
+        let source = dir.join("source.nup");
+        let output = dir.join("output.nx");
+        let bytes = build(&[base(APP), update(APP, 65536, 0), addon(APP)], compressed);
+        fs::write(&source, &bytes).unwrap();
+        let limits = ImportLimits {
+            compare_source_bytes: true,
+            ..ImportLimits::default()
+        };
+        let stats = convert_nup(
+            &source,
+            &output,
+            &NupOptions {
+                stream: true,
+                ..nup_options()
+            },
+            &limits,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        assert!(stats.conversion.source_bytes_compared > 0);
+        inspect_archive(&output, &WriterOptions::default(), IntegrityPolicy::Strict).unwrap();
+        let checked =
+            check_nup(&source, &output, false, &limits, &WriterOptions::default()).unwrap();
+        assert_eq!(checked.snapshots, 3);
+        assert_eq!(fs::read(&source).unwrap(), bytes);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
 fn base_update_and_metadata_convert_to_nx() {
     for zstd in [false, true] {
         let dir = work(if zstd { "zstd" } else { "raw" });

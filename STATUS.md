@@ -140,5 +140,7 @@ version or exact dependency is invented. Known native version conflicts, false
 links, incoherent identities, missing required content and corruption still
 reject. Native raw-content behavior is unchanged. No NX wire-format change.
 
-284 packer tests passed (one ignored), plus 16 GUI tests; see TESTING.md. These
+Paranoid source comparison now reopens streamed NUP files through the same
+checked reader; raw/Zstd and mapped DataPatch regressions cover this path.
+285 packer tests passed (one ignored), plus 16 GUI tests; see TESTING.md. These
 changes remain local pending real-source validation and PM publication review.
