@@ -109,12 +109,17 @@ Corrected same-write dependency resolution to include Program ID, so DLC requiri
 an exact primary snapshot cannot attach to an auxiliary of the same version.
 GUI native discovery includes supported DataPatch records. No NX wire change.
 
-280 packer tests (one ignored) and 15 GUI tests passed; coverage includes native
+281 packer tests (one ignored) and 15 GUI tests passed; coverage includes native
 and materialized conversion, artificial CTR decryption, source comparison,
 strict verification, extraction, exact restoration/recipe replay and rejection
 of inconsistent/incomplete inputs. See TESTING.md and docs/DATAPATCH.md.
 Raw BKTR/sparse DataPatch reconstruction remains unsupported and is reported
 explicitly. No real DataPatch conversion/gameplay or new manual UI pass claimed.
-The current real NUP is recognized past DataPatch parsing but still lacks its
-main executable. No source content is fabricated or dropped. Existing NUP spec
+The current real NUP is recognized past DataPatch parsing, but automatic launch-
+role inference is unavailable without index zero. This does not prove missing
+executable data; an explicit nonzero-index primary is permitted by NX. A private
+explicit mapping instead reaches an unmet DLC requirement: application version
+983040, versus an executable package labelled 0 with no executable CNMT to
+establish another version. Conversion remains blocked pending version evidence;
+no source content or version is fabricated or dropped. Existing NUP spec
 warnings and opt-in remain mandatory. No source push or release authorized yet.

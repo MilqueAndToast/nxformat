@@ -1112,7 +1112,7 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical().max_height(220.0).show(ui,|ui| { for violation in &review.preflight.violations { ui.label(violation); } });
                     ui.label("Compatibility preserves supported contents in NX; it does not repair NUP conformance. Your consent cannot override unsupported content, identity conflicts, missing required content or integrity failures.");
                 } else { ui.label("No representational NUP v1 violations detected. Content and identity checks still apply."); }
-                ui.label("Use embedded metadata to identify programs and DLC. Program index 0 is treated as primary. Missing or conflicting relationships will stop generation.");
+                ui.label("Automatic generation uses program index 0 by convention. Explicit mappings can declare another validated native launch program. Missing or conflicting relationship evidence stops generation.");
                 ui.label("Continuing declares that the stored program trees are complete. Metadata cannot prove this or guarantee the game will boot. Your source stays unchanged.");
                 ui.horizontal(|ui| {
                     let cancel=ui.button("Cancel");

@@ -6,18 +6,18 @@ use crate::{Platform, ProgramKind, SnapshotType};
 mod generate;
 pub use generate::generate_nup_mapping;
 
-// The application platform follows its executable metadata. Legacy non-executable
+// Application platform is bound to validated native content markers. Legacy non-executable
 // DLC can remain attached to that same application in a newer program export.
 // The native DLC marker remains intact in preserved CNMT bytes/provenance.
 fn cnmt_platform_matches(
     meta: &crate::native::ContentMeta,
     platform: Platform,
-    switch2_executable: bool,
+    switch2_content: bool,
 ) -> bool {
     match (meta.platform_byte, platform) {
         (0, Platform::Switch1) | (1, Platform::Switch2) => true,
         (0, Platform::Switch2) => {
-            switch2_executable
+            switch2_content
                 && matches!(
                     meta.meta_type,
                     crate::native::ContentMetaType::AddOnContent
@@ -263,6 +263,13 @@ impl Mapping {
                         "mapped Program ID differs from native NPDM; do not patch or relabel it",
                     ));
                 }
+                if facts.program_id & 0x00ff_ffff_ffff_ff00
+                    != s.application_id & 0x00ff_ffff_ffff_ff00
+                {
+                    return Err(bad(
+                        "mapped Program ID belongs to a different native application family",
+                    ));
+                }
             }
             let own_cnmts_start = cnmts.len();
             for (name, index) in &tree.files {
@@ -389,18 +396,19 @@ impl Mapping {
         if primary.len() != 1 {
             return Err(bad("mapping requires exactly one primary Program ID"));
         }
-        let switch2_executable = cnmts.iter().any(|m| {
+        let switch2_content = cnmts.iter().any(|m| {
             m.application_id == first.application_id
                 && m.platform_byte == 1
                 && matches!(
                     m.meta_type,
                     crate::native::ContentMetaType::Application
                         | crate::native::ContentMetaType::Patch
+                        | crate::native::ContentMetaType::DataPatch
                 )
         });
         for meta in &cnmts {
             if meta.application_id != first.application_id
-                || !cnmt_platform_matches(meta, first.platform, switch2_executable)
+                || !cnmt_platform_matches(meta, first.platform, switch2_content)
             {
                 return Err(bad(
                     "mapping contradicts embedded CNMT application/platform",
@@ -494,7 +502,10 @@ impl Mapping {
                                 && d.numeric_version >= minimum
                         })
                     }) {
-                        return Err(bad("DLC required application version is not represented by an exact dependency"));
+                        return Err(bad(&format!(
+                            "DLC {:016x} requires application version {minimum} or newer, but its exact dependencies do not supply that version; supply a matching application snapshot without relabelling its version",
+                            meta.title_id
+                        )));
                     }
                 }
                 if !compatible {

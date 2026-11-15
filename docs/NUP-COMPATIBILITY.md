@@ -61,26 +61,31 @@ multiple edition controls are preserved but not guessed between (display falls
 back to package metadata). Generation validates the mapping before saving it.
 This does not repair conflicting CNMTs or establish game completeness.
 
-The application platform comes from executable Application/Patch CNMT. Original
+Automatic generation uses executable Application/Patch CNMT for platform. A
+reviewed explicit mapping can also bind its declared application platform to a
+validated DataPatch marker when executable CNMT is unavailable; launch role and
+program version remain explicit declarations. Original
 Switch 1 AddOnContent may accompany Switch 2 programs when its exact application
 and DLC title/version match and it has no executable content. Its original
 platform marker and bytes remain preserved. Executable platform conflicts,
 unrelated DLC and newer-platform DLC attached to older-platform programs still
-fail validation. A container with only auxiliary programs needs a new export
-including its main executable. Complete materialized DataPatch views are now
+fail validation. Absence of program index zero does not prove missing game data:
+this generator cannot infer its launch role, so use a reviewed explicit mapping
+naming an existing native launch Program. Complete materialized DataPatch views are now
 supported in source builds; raw base-dependent patch reconstruction remains
 unsupported. [DataPatch scope](DATAPATCH.md).
 
 This representation uses the existing [NX catalog rules](SPEC.md#4-fast-catalog):
 platform belongs to the application, native executable IDs belong to Program
 rows, and add-on-title DLC has no invented executable association. The importer
-chooses the application execution platform from validated executable metadata;
+checks the application execution platform against validated native metadata;
 the NX format itself does not guarantee runtime compatibility of older DLC.
 Native DataPatch is a documented [CNMT type](https://switchbrew.org/wiki/CNMT#DataPatchMetaExtendedHeader),
 not evidence of corruption. Its own CNMT type and patch identity are preserved;
 the complete updated DLC view uses its native target DataId and patch version.
-It cannot be relabelled as AddOnContent. An auxiliary-only container may contain valid
-auxiliary content; it is not a complete main-game export for this workflow.
+It cannot be relabelled as AddOnContent. A mapping declaring only auxiliary
+programs cannot meet NX's one-primary requirement; numeric index alone does not
+determine that role.
 
 Generation errors appear on the affected source card with the reason and next
 step. This includes save failures, cancelled/unavailable save dialogs, invalid

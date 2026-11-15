@@ -758,7 +758,7 @@ fn legacy_dlc_keeps_native_marker_under_matching_newer_application() {
 }
 
 #[test]
-fn supported_datapatch_does_not_hide_a_missing_primary_executable() {
+fn automatic_mapping_reports_missing_launch_evidence_without_claiming_missing_files() {
     let dir = work("data-patch-blocker");
     let input = dir.join("source.nup");
     let mut patch = vec![0u8; 0x40];
@@ -785,8 +785,9 @@ fn supported_datapatch_does_not_hide_a_missing_primary_executable() {
     .unwrap_err()
     .to_string();
     assert!(!error.contains("contains DataPatch metadata"));
-    assert!(error.contains("No primary executable"));
-    assert!(error.contains("Re-export"));
+    assert!(error.contains("Automatic launch-role inference is unavailable"));
+    assert!(error.contains("does not prove executable data is missing"));
+    assert!(error.contains("explicit mapping"));
     assert!(!error.contains("conflicting CNMT applications"));
 }
 
@@ -1028,4 +1029,88 @@ fn datapatch_mapping_rejects_bad_target_minimum_version_and_forward_link() {
             "case {case}"
         );
     }
+}
+
+#[test]
+fn explicit_nonzero_launch_program_is_primary_without_rewriting_its_id() {
+    let dir = work("nonzero-launch");
+    let source = dir.join("source.nup");
+    let map = dir.join("source.nxnupmap");
+    let output = dir.join("source.nx");
+    let mut legacy = vec![0u8; 0x30];
+    legacy[..8].copy_from_slice(&(APP + 0x1001).to_le_bytes());
+    legacy[0xc] = 0x82;
+    legacy[0xe] = 0x10;
+    legacy[0x20..0x28].copy_from_slice(&APP.to_le_bytes());
+    let bytes = build_with_extras(
+        &[base(AUX), addon(APP), addon(APP)],
+        true,
+        &[
+            (
+                1,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File("AddOnContent.cnmt", legacy)],
+                )],
+            ),
+            (
+                2,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File(
+                        "DataPatch.cnmt",
+                        data_patch_cnmt(APP + 0x1001, APP + 0x1801, 7, 0),
+                    )],
+                )],
+            ),
+        ],
+    );
+    fs::write(&source, &bytes).unwrap();
+    let hash = bytes[24..56]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let text=format!("NXNUPMAP\t1\t{hash}\nNXIMPORT\t1\nsnapshot\tlaunch\tpackage-0\tswitch2\t{APP:016x}\t{AUX:016x}\tprimary\tbase\t0\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\nsnapshot\told\tpackage-1\tswitch2\t{APP:016x}\t-\tnone\tdlc\t0\tcomplete\tmaterialized-v1\tnone\naddon\told\t{:016x}\nsnapshot\tpatched\tpackage-2\tswitch2\t{APP:016x}\t-\tnone\tdlc\t7\tcomplete\tmaterialized-v1\tnone\naddon\tpatched\t{:016x}\n",APP+0x1001,APP+0x1001);
+    fs::write(&map, text).unwrap();
+    let limits = ImportLimits::default();
+    inspect_nup_with_mapping(&source, &map, &limits, &crate::CancellationToken::default()).unwrap();
+    convert_nup(
+        &source,
+        &output,
+        &NupOptions {
+            mapping: Some(map.clone()),
+            platform: Some(Platform::Switch2),
+            stream: true,
+            ..Default::default()
+        },
+        &limits,
+        &WriterOptions::default(),
+    )
+    .unwrap();
+    let summary = crate::inspect_archive(
+        &output,
+        &WriterOptions::default(),
+        crate::IntegrityPolicy::Strict,
+    )
+    .unwrap();
+    assert_eq!(summary.applications[0].programs.len(), 1);
+    assert_eq!(summary.applications[0].programs[0].program_id, AUX);
+    assert_eq!(
+        summary.applications[0].programs[0].kind,
+        ProgramKind::Primary
+    );
+    assert_eq!(
+        check_nup_with_mapping(
+            &source,
+            &output,
+            false,
+            &map,
+            &limits,
+            &WriterOptions::default()
+        )
+        .unwrap()
+        .snapshots,
+        3
+    );
+    assert_eq!(fs::read(source).unwrap(), bytes);
 }

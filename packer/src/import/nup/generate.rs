@@ -64,10 +64,10 @@ pub fn generate_nup_mapping(
         ));
     }
     if !programs.iter().flatten().any(|(id, _)| *id as u8 == 0) {
-        unsupported.push("No primary executable (native program index 0) is present in the package table; an auxiliary program cannot be relabelled as the main game".into());
+        unsupported.push("No program-index-0 executable is present. Automatic launch-role inference is unavailable; this does not prove executable data is missing. Use a reviewed explicit mapping declaring the intended existing native launch Program".into());
     }
     if !unsupported.is_empty() {
-        return Err(bad(&format!("Cannot generate mapping: {}. Re-export complete program/DLC views with their original metadata, including the main executable; retry generation on that export.", unsupported.join(". "))));
+        return Err(bad(&format!("Cannot generate mapping: {}. Review the original metadata and provide explicit supported declarations; unsupported layouts or demonstrably missing required content cannot be overridden.", unsupported.join(". "))));
     }
     let executable_metas: Vec<_> = metas
         .iter()

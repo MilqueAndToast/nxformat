@@ -8,12 +8,13 @@ required application version and AddOnContent's forward DataPatchId separately.
 Native snapshots preserve actual Meta/Data NCAs and Content IDs; materialized
 snapshots preserve original metadata while identifying the updated target DLC.
 
-Validation: 280 packer tests passed (one intentionally ignored), plus 15 GUI
+Validation: 281 packer tests passed (one intentionally ignored), plus 15 GUI
 tests. Synthetic coverage includes:
 
 - Full materialized NUP conversion in staged and streamed modes; separate old and
   updated DLC, preserved patch metadata, deletions without filename overlay,
-  exact primary-Program minimum-version dependencies, strict NX verification,
+  exact primary-Program minimum-version dependencies, explicit nonzero launch
+  Program mapping without ID rewriting, strict NX verification,
   complete source comparison and extraction.
 - Complete native DataPatch discovery, planning, conversion and addition through
   normal CLI/GUI flows; exact application/target metadata, standalone IVFC Data
@@ -33,9 +34,16 @@ auxiliary snapshot with the same type/version as the primary. This changes no
 NX wire format. GUI discovery now includes supported native DataPatch content.
 
 The current real NUP containing a DataPatch was reread and its TOC hash verified.
-Generation now recognizes DataPatch and reports only its separate missing-main-
-executable blocker. No mapping/output was published for that incomplete source;
-no real DataPatch conversion, gameplay or new manual UI validation is claimed.
+Generation recognizes DataPatch but cannot infer its launch role from the
+index-zero convention. The earlier claim that absence of index zero proves a
+missing main executable was too categorical: NX roles are independent of index,
+and an explicit nonzero-index primary is valid. A private explicit mapping then
+passed launch identity/platform checks but failed the DLC minimum-version check:
+one add-on requires application version 983040, while the only executable package
+is labelled version 0 and has no executable CNMT establishing a different version.
+This does not establish missing game bytes. No version was invented, no accepted
+mapping/output was produced, and no real DataPatch conversion, gameplay or new
+manual UI validation is claimed.
 The prior spec warning/affirmative opt-in remains in force. Raw BKTR/sparse
 DataPatch reconstruction, native encrypted Switch 2 input and additional native
 layouts remain unsupported. Originals were read-only. Private evidence and logs
