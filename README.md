@@ -70,7 +70,7 @@ Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Already-
 **The current source includes upstream NXConvert 1.0.3** and writes NX archives with separate header pages. The existing NX wire formats are unchanged. Local Decryption 1.0.3e adds batch NUP mapping with automatic cleanup, scrollable compatibility warnings, and existing-output detection with queue skipping.
 Download [Local Decryption 1.0.3e for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/download/v1.0.3e/NXConvert-Local-Decryption-1.0.3e-Windows-x64.zip)
 
-Fork versions follow the upstream release plus a letter (`1.0.3a`, `1.0.3b`, …), restarting at `a` when a newer upstream release is merged. See [release versioning](docs/FORK-RELEASES.md).
+Fork versions follow the upstream release plus a letter (`1.0.3a`, `1.0.3b`, …), restarting at `a` when a newer upstream release is merged. Previews use the upcoming release letter plus `-preview1`, `-preview2`, and so on; only proper public releases advance the letter. See [release versioning](docs/FORK-RELEASES.md).
 from [this fork's releases](https://github.com/MilqueAndToast/nxformat/releases),
 or build from source below. Current fork releases include the Windows app and source only.
 
