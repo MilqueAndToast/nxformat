@@ -141,6 +141,7 @@ nxconvert pack-tree PACKAGE OUTPUT.nx [--platform switch1|switch2] [--tree-root 
 nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc] [--nup-map FILE]\n\
 nxconvert map-nup INPUT.nup OUTPUT.nxnupmap --assume-complete (generate a checked compatibility mapping)\n\
+--allow-nonconforming-nup explicitly acknowledges the reported NUP-v1 violations for map-nup or pack-nup/check-nup with --nup-map; default rejects these inputs.\n\
 nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] [--nup-map FILE] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
 nxconvert pack SOURCE... OUTPUT.nx [--keys prod.keys] [--title-keys title.keys] [--no-recipe [--omit-firmware]]\n\
 --keys enables streaming NSP/XCI decryption; adjacent title.keys is loaded automatically. Recipes default OFF with keys; --recipe rebuilds decrypted bytes, not encrypted originals.\n\
@@ -189,6 +190,7 @@ struct Options {
     skip_dlc: bool,
     nup_mapping: Option<PathBuf>,
     assume_complete: bool,
+    allow_nonconforming_nup: bool,
     /// `--recipe` / `--no-recipe`; pack and add keep recipes unless told not to.
     recipe: Option<bool>,
     omit_firmware: bool,
@@ -220,6 +222,10 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
         }
         if a == "--assume-complete" {
             o.assume_complete = true;
+            continue;
+        }
+        if a == "--allow-nonconforming-nup" {
+            o.allow_nonconforming_nup = true;
             continue;
         }
         if a == "--paranoid" {
@@ -2340,6 +2346,28 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     if o.assume_complete && args.first().map(String::as_str) != Some("map-nup") {
         return Err("--assume-complete applies to map-nup only".into());
     }
+    let compatibility_command = args.first().is_some_and(|c| {
+        c == "map-nup"
+            || (matches!(c.as_str(), "pack-nup" | "check-nup") && o.nup_mapping.is_some())
+    });
+    if o.allow_nonconforming_nup && !compatibility_command {
+        return Err("--allow-nonconforming-nup requires map-nup or pack-nup/check-nup with an explicit mapping".into());
+    }
+    if compatibility_command {
+        let input = args.get(1).ok_or_else(|| "missing NUP source")?;
+        let preflight = import::inspect_nup_spec(
+            Path::new(input),
+            &import::ImportLimits::for_nup(),
+            &command_token(&o),
+        )?;
+        if !preflight.violations.is_empty() {
+            let warning=format!("{} does not conform to NUP v1:\n{}\nCompatibility does not repair NUP conformance or override unsupported content, identity/integrity checks or NX requirements.",input,preflight.violations.join("\n"));
+            if !o.allow_nonconforming_nup {
+                return Err(format!("{warning}\nReview these violations, then explicitly add --allow-nonconforming-nup to continue in compatibility mode.").into());
+            }
+            eprintln!("WARNING: {warning}\nExplicit compatibility acknowledgment received.");
+        }
+    }
     if args.first().map(String::as_str) == Some("map-nup") {
         if args.len() != 3 || !o.assume_complete {
             return Err("map-nup INPUT.nup OUTPUT.nxnupmap requires --assume-complete: metadata cannot prove stored program views are complete".into());
@@ -2352,14 +2380,14 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&args[2])?;
+            .open(&args[2]).map_err(|e| format!("Could not save mapping {}: {e}. Choose a new filename in a writable folder; existing mappings are not overwritten.", args[2]))?;
         if let Err(error) = output
             .write_all(mapping.as_bytes())
             .and_then(|_| output.sync_all())
         {
             drop(output);
             let _ = std::fs::remove_file(&args[2]);
-            return Err(error.into());
+            return Err(format!("Could not finish saving mapping {}: {error}. Choose a writable folder with enough free space and retry.",args[2]).into());
         }
         println!("Generated TOC-bound mapping: {}. Program index zero is primary; other indices are auxiliary. Completeness is caller-declared; gameplay is untested. Review before conversion.", args[2]);
         return Ok(());

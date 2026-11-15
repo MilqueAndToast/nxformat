@@ -25,6 +25,7 @@ pub use nup::{
     inspect_nup_with_mapping, stage_nup, stage_nup_with_options, NupCheck, NupConversionStats,
     NupInfo, NupOptions, NupPackageInfo, NupStage, SkippedAddon,
 };
+pub use nup::{inspect_nup_spec, NupPreflight};
 use std::path::PathBuf;
 pub use tree::{
     audit_executables, discover, inspect_tree, ExecutableAudit, SourceFile, TreeCandidate, TreeView,

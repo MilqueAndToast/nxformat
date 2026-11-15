@@ -24,6 +24,8 @@ use crate::native::NACP_LANGUAGE_MAP;
 use crate::WriterOptions;
 mod compatibility;
 pub use compatibility::{generate_nup_mapping, inspect_nup_with_mapping};
+mod preflight;
+pub use preflight::{inspect_nup_spec, NupPreflight};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},

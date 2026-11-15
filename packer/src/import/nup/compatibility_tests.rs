@@ -423,6 +423,13 @@ fn generated_mapping_preserves_programs_updates_dlc_and_converts() {
     assert!(!mapping.exists());
     let mut args = args;
     args.push("--assume-complete".into());
+    let error = crate::cli::run(args.clone(), None, None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("does not conform to NUP v1"));
+    assert!(error.contains("--allow-nonconforming-nup"));
+    assert!(!mapping.exists());
+    args.push("--allow-nonconforming-nup".into());
     crate::cli::run(args.clone(), None, None).unwrap();
     assert_eq!(fs::read_to_string(&mapping).unwrap(), text);
     assert!(crate::cli::run(args, None, None).is_err());
@@ -505,6 +512,109 @@ fn generation_rejects_missing_ambiguous_cancelled_and_over_budget() {
 }
 
 #[test]
+fn nonconforming_cli_requires_acknowledgment_even_with_an_existing_mapping() {
+    let dir = work("spec-acknowledgment");
+    let input = dir.join("source.nup");
+    let map = dir.join("existing.nxnupmap");
+    let output = dir.join("output.nx");
+    let bytes = generation_fixture(false);
+    fs::write(&input, &bytes).unwrap();
+    let limits = ImportLimits::default();
+    let token = crate::CancellationToken::default();
+    let preflight = inspect_nup_spec(&input, &limits, &token).unwrap();
+    assert!(preflight.violations.iter().any(|v| v.contains("2 BASE")));
+    assert!(preflight.violations.iter().any(|v| v.contains("meta")));
+    fs::write(&map, generate_nup_mapping(&input, &limits, &token).unwrap()).unwrap();
+    let mut pack = vec![
+        "pack-nup".into(),
+        input.to_string_lossy().into_owned(),
+        output.to_string_lossy().into_owned(),
+        "--nup-map".into(),
+        map.to_string_lossy().into_owned(),
+        "--platform".into(),
+        "switch2".into(),
+    ];
+    let error = crate::cli::run(pack.clone(), None, None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("does not conform"));
+    assert!(!output.exists());
+    pack.push("--allow-nonconforming-nup".into());
+    crate::cli::run(pack, None, None).unwrap();
+    let mut check = vec![
+        "check-nup".into(),
+        input.to_string_lossy().into_owned(),
+        output.to_string_lossy().into_owned(),
+        "--nup-map".into(),
+        map.to_string_lossy().into_owned(),
+    ];
+    assert!(crate::cli::run(check.clone(), None, None)
+        .unwrap_err()
+        .to_string()
+        .contains("--allow-nonconforming-nup"));
+    check.push("--allow-nonconforming-nup".into());
+    crate::cli::run(check, None, None).unwrap();
+    // Consent cannot override a damaged TOC.
+    let mut corrupt = bytes;
+    corrupt[0x90] ^= 1;
+    fs::write(&input, corrupt).unwrap();
+    assert!(inspect_nup_spec(&input, &limits, &token)
+        .unwrap_err()
+        .to_string()
+        .contains("SHA-256"));
+    let mapping_output = dir.join("corrupt.nxnupmap");
+    assert!(crate::cli::run(
+        vec![
+            "map-nup".into(),
+            input.to_string_lossy().into_owned(),
+            mapping_output.to_string_lossy().into_owned(),
+            "--assume-complete".into(),
+            "--allow-nonconforming-nup".into()
+        ],
+        None,
+        None
+    )
+    .is_err());
+    assert!(!mapping_output.exists());
+}
+
+#[test]
+fn preflight_distinguishes_canonical_input_and_wrong_numeric_version() {
+    let dir = work("preflight-version");
+    let input = dir.join("source.nup");
+    let limits = ImportLimits::default();
+    let token = crate::CancellationToken::default();
+    fs::write(&input, build(&[base(APP)], true)).unwrap();
+    assert!(inspect_nup_spec(&input, &limits, &token)
+        .unwrap()
+        .violations
+        .is_empty());
+    let mut meta = cnmt();
+    meta[8..12].copy_from_slice(&5u32.to_le_bytes());
+    fs::write(
+        &input,
+        build_with_extras(
+            &[base(APP)],
+            true,
+            &[(
+                0,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File("Application.cnmt", meta)],
+                )],
+            )],
+        ),
+    )
+    .unwrap();
+    let warnings = inspect_nup_spec(&input, &limits, &token)
+        .unwrap()
+        .violations;
+    assert!(warnings
+        .iter()
+        .any(|v| v.contains("version 0") && v.contains("version 5")));
+}
+
+#[test]
 fn generation_selects_only_unambiguous_valid_control_metadata() {
     let dir = work("generation-control");
     let input = dir.join("source.nup");
@@ -551,4 +661,131 @@ fn generation_selects_only_unambiguous_valid_control_metadata() {
             );
         }
     }
+}
+
+#[test]
+fn legacy_dlc_keeps_native_marker_under_matching_newer_application() {
+    let dir = work("legacy-dlc");
+    let input = dir.join("source.nup");
+    let map = dir.join("source.nxnupmap");
+    // Legacy DLC shares the exact application, but not the executable platform.
+    for case in 0..4 {
+        let mut dlc = vec![0u8; 0x30];
+        dlc[..8].copy_from_slice(&(APP + 0x1001).to_le_bytes());
+        dlc[0xc] = 0x82;
+        dlc[0xe] = 0x10;
+        dlc[0x20..0x28]
+            .copy_from_slice(&(if case == 1 { APP + 0x10000 } else { APP }).to_le_bytes());
+        if case == 2 {
+            dlc[0xd] = 2;
+        }
+        if case == 3 {
+            dlc.resize(0x68, 0);
+            dlc[0x10] = 1;
+            dlc[0x30 + 0x36] = 1;
+        }
+        let bytes = build_with_extras(
+            &[base(AUX), base(APP), addon(APP)],
+            true,
+            &[
+                (
+                    1,
+                    vec![Node::Dir(
+                        "meta",
+                        vec![Node::File("Application.cnmt", cnmt())],
+                    )],
+                ),
+                (
+                    2,
+                    vec![Node::Dir(
+                        "meta",
+                        vec![Node::File("AddOnContent.cnmt", dlc.clone())],
+                    )],
+                ),
+            ],
+        );
+        fs::write(&input, &bytes).unwrap();
+        let result = generate_nup_mapping(
+            &input,
+            &ImportLimits::default(),
+            &crate::CancellationToken::default(),
+        );
+        if case != 0 {
+            assert!(result.is_err(), "case {case}");
+            continue;
+        }
+        fs::write(&map, result.unwrap()).unwrap();
+        let output = dir.join("legacy.nx");
+        convert_nup(
+            &input,
+            &output,
+            &NupOptions {
+                mapping: Some(map.clone()),
+                platform: Some(Platform::Switch2),
+                stream: true,
+                ..Default::default()
+            },
+            &ImportLimits::default(),
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            check_nup_with_mapping(
+                &input,
+                &output,
+                false,
+                &map,
+                &ImportLimits::default(),
+                &WriterOptions::default()
+            )
+            .unwrap()
+            .snapshots,
+            3
+        );
+        let summary = crate::inspect_archive(
+            &output,
+            &WriterOptions::default(),
+            crate::IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        assert_eq!(summary.applications[0].platform, Platform::Switch2);
+        assert!(summary.applications[0]
+            .snapshots
+            .iter()
+            .any(|s| s.snapshot_type == SnapshotType::Dlc && s.program_id.is_none()));
+        assert_eq!(fs::read(&input).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn missing_primary_and_data_patch_give_specific_reexport_instructions() {
+    let dir = work("data-patch-blocker");
+    let input = dir.join("source.nup");
+    let mut patch = vec![0u8; 0x40];
+    patch[..8].copy_from_slice(&(APP + 0x1801).to_le_bytes());
+    patch[0xc] = 0x84;
+    patch[0xd] = 1;
+    patch[0xe] = 0x20;
+    patch[0x20..0x28].copy_from_slice(&(APP + 0x1001).to_le_bytes());
+    patch[0x28..0x30].copy_from_slice(&APP.to_le_bytes());
+    let bytes = build_with_extras(
+        &[base(AUX), addon(APP)],
+        true,
+        &[(
+            1,
+            vec![Node::Dir("meta", vec![Node::File("DataPatch.cnmt", patch)])],
+        )],
+    );
+    fs::write(&input, bytes).unwrap();
+    let error = generate_nup_mapping(
+        &input,
+        &ImportLimits::default(),
+        &crate::CancellationToken::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("package-1 contains DataPatch"));
+    assert!(error.contains("No primary executable"));
+    assert!(error.contains("Re-export"));
+    assert!(!error.contains("conflicting CNMT applications"));
 }

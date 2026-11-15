@@ -6,13 +6,35 @@ use crate::{Platform, ProgramKind, SnapshotType};
 mod generate;
 pub use generate::generate_nup_mapping;
 
+// The application platform follows its executable metadata. Legacy non-executable
+// DLC can remain attached to that same application in a newer program export.
+// The native DLC marker remains intact in preserved CNMT bytes/provenance.
+fn cnmt_platform_matches(
+    meta: &crate::native::ContentMeta,
+    platform: Platform,
+    switch2_executable: bool,
+) -> bool {
+    match (meta.platform_byte, platform) {
+        (0, Platform::Switch1) | (1, Platform::Switch2) => true,
+        (0, Platform::Switch2) => {
+            switch2_executable
+                && meta.meta_type == crate::native::ContentMetaType::AddOnContent
+                && !meta
+                    .contents
+                    .iter()
+                    .any(|c| c.record_type == crate::native::ContentRecordType::Program)
+        }
+        _ => false,
+    }
+}
+
 pub(super) struct Mapping {
     pub manifest: DeclarationManifest,
     pub indices: Vec<usize>,
     pub trees: Vec<Tree>,
 }
 
-fn small_file(
+pub(super) fn small_file(
     path: &Path,
     f: &NupFile,
     token: &crate::CancellationToken,
@@ -322,13 +344,19 @@ impl Mapping {
         if primary.len() != 1 {
             return Err(bad("mapping requires exactly one primary Program ID"));
         }
+        let switch2_executable = cnmts.iter().any(|m| {
+            m.application_id == first.application_id
+                && m.platform_byte == 1
+                && matches!(
+                    m.meta_type,
+                    crate::native::ContentMetaType::Application
+                        | crate::native::ContentMetaType::Patch
+                )
+        });
         for meta in &cnmts {
-            let platform = match meta.platform_byte {
-                0 => Platform::Switch1,
-                1 => Platform::Switch2,
-                _ => return Err(bad("unsupported embedded CNMT platform")),
-            };
-            if meta.application_id != first.application_id || platform != first.platform {
+            if meta.application_id != first.application_id
+                || !cnmt_platform_matches(meta, first.platform, switch2_executable)
+            {
                 return Err(bad(
                     "mapping contradicts embedded CNMT application/platform",
                 ));

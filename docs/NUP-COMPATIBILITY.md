@@ -6,27 +6,49 @@ Program ID and NPDM profile under one application, with primary/auxiliary roles,
 per-program updates and separate DLC. Ordinary NUP v1 validation is unchanged.
 Available in Local Decryption 1.0.3.1 and newer.
 
+NUP 1.0-draft [§3.1.2](https://github.com/a55uka/nup/blob/a4840f06c94ddeb414eea5b33c9704ffe995f11c/SPEC.md#312-package-kinds)
+allows at most one BASE. A source with multiple BASE records is nonconforming
+NUP v1, even when its decoded native contents are coherent. Explicit mapping
+interprets those contents for compatibility; it does not certify or repair NUP
+v1 conformance. The resulting NX must satisfy its specification and integrity
+checks.
+
 ## Use
 
 In the GUI, add the NUP and choose **Generate NUP mapping…** on its source card
-(including a rejected source). Read the completeness assumption, choose
-**Assume complete and generate…**, and save a new `.nxnupmap` file. A successful
+(including a rejected source). A per-file preflight lists detected NUP-v1
+violations before anything is enabled. **Cancel** is the safe default. Choose
+**Continue in compatibility mode** only after reviewing the warning and
+completeness assumption, then save a new `.nxnupmap` file. A successful
 mapping is loaded automatically; then convert. **Load NUP mapping…** selects an
 existing reviewed mapping instead.
+Existing mappings go through the same warning; their existence does not supply
+consent. If the source TOC changes after review, review it again. Acknowledgment
+lasts for the loaded source in this app session.
 **Remove mapping** restores strict discovery. Generic rescans retain an active
 mapping; adjacent sidecars are never loaded automatically. Conversion rechecks
 the selected file and source rather than trusting discovery results.
 
 ```text
-nxconvert map-nup game.nup game.nxnupmap --assume-complete
-nxconvert pack-nup game.nup game.nx --platform switch2 --nup-map game.nxnupmap
+nxconvert map-nup game.nup game.nxnupmap --assume-complete --allow-nonconforming-nup
+nxconvert pack-nup game.nup game.nx --platform switch2 --nup-map game.nxnupmap --allow-nonconforming-nup
 nxconvert verify game.nx
-nxconvert check-nup game.nup game.nx --nup-map game.nxnupmap
+nxconvert check-nup game.nup game.nx --nup-map game.nxnupmap --allow-nonconforming-nup
 nxconvert extract game.nx extracted --no-restore
 ```
 
+Omit `--allow-nonconforming-nup` initially to read the detected violations; a
+nonconforming input is rejected before generating, applying or converting with a
+mapping. The flag explicitly acknowledges those violations for that command and
+prints them again. Conforming sources need no such flag. Preflight identifies
+multiple BASE records, noncanonical roots, standalone-flag inconsistencies,
+executable-CNMT numeric-version mismatches and reserved listing artifacts; it is not an exhaustive conformance certificate.
+Structural or integrity failures remain hard errors. Consent cannot override
+unsupported patch composition, missing required content, incoherent identities
+or NX output requirements. Strict ordinary import remains the default.
+
 Generation reads embedded NPDM and `meta/*.cnmt` without decrypting or rewriting
-the NUP. It requires one consistent application/platform and an unambiguous
+the NUP. It requires one consistent executable application/platform and an unambiguous
 CNMT relationship for each package. A package's own CNMT takes precedence;
 otherwise a unique matching sibling CNMT is required. Native program index zero
 is assigned the primary role; other indices are auxiliary. Matching earlier
@@ -38,6 +60,30 @@ files are never overwritten. A unique control NACP is selected automatically;
 multiple edition controls are preserved but not guessed between (display falls
 back to package metadata). Generation validates the mapping before saving it.
 This does not repair conflicting CNMTs or establish game completeness.
+
+The application platform comes from executable Application/Patch CNMT. Original
+Switch 1 AddOnContent may accompany Switch 2 programs when its exact application
+and DLC title/version match and it has no executable content. Its original
+platform marker and bytes remain preserved. Executable platform conflicts,
+unrelated DLC and newer-platform DLC attached to older-platform programs still
+fail validation. A container with only auxiliary programs needs a new export
+including its main executable. DataPatch composition remains unsupported; export
+complete DLC views with their AddOnContent metadata instead.
+
+This representation uses the existing [NX catalog rules](SPEC.md#4-fast-catalog):
+platform belongs to the application, native executable IDs belong to Program
+rows, and add-on-title DLC has no invented executable association. The importer
+chooses the application execution platform from validated executable metadata;
+the NX format itself does not guarantee runtime compatibility of older DLC.
+Native DataPatch is a documented [CNMT type](https://switchbrew.org/wiki/CNMT#DataPatchMetaExtendedHeader),
+not evidence of corruption. It needs a distinct patch implementation and cannot
+be relabelled as ordinary DLC. An auxiliary-only container may contain valid
+auxiliary content; it is not a complete main-game export for this workflow.
+
+Generation errors appear on the affected source card with the reason and next
+step. This includes save failures, cancelled/unavailable save dialogs, invalid
+mapping loads and unexpected background-task termination. Existing mapping
+files are never overwritten; choose a new filename when saving again.
 
 ## Mapping format and checks
 
@@ -60,7 +106,7 @@ subdirectories. For example, `nacp<TAB>main<TAB>control/Acd_1/control.nacp`
 selects that file for display without removing other control data.
 
 Embedded CNMTs in the package's `meta/` tree must agree with application,
-platform, version and snapshot kind. Their Program content offsets must match
+version and snapshot kind and satisfy the platform rules above. Their Program content offsets must match
 the declared program set; mixed generation prefixes are retained, not rewritten.
 Duplicate offsets, unrelated IDs, ambiguous roles, stale hashes, incorrect
 profiles and cross-program update dependencies are rejected. Composition,

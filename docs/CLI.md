@@ -51,6 +51,8 @@ not validate every NUP display-metadata TLV.
 
 This fork additionally supports explicit [multi-program NUP compatibility mappings](NUP-COMPATIBILITY.md).
 Without `--nup-map`, ordinary NUP v1 validation remains strict.
+Nonconforming sources print their detected violations and require
+`--allow-nonconforming-nup` for mapping generation or mapped conversion/checking.
 
 ## Display title and artwork
 

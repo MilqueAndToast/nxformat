@@ -20,6 +20,7 @@ pub fn generate_nup_mapping(
     let mut programs = Vec::new();
     let mut used = 0u64;
     let mut entries = 0;
+    let mut unsupported = Vec::new();
     for (i, p) in toc.packages.iter().enumerate() {
         cancelled(token)?;
         let tree = complete_tree(&toc, p, limits)?;
@@ -45,6 +46,12 @@ pub fn generate_nup_mapping(
                 let bytes = small_file(nup, &toc.files[*index], token, 1024 * 1024)?;
                 let meta = crate::native::nca::parse_cnmt(&bytes)
                     .map_err(|e| bad(&format!("invalid embedded CNMT: {e}")))?;
+                if !matches!(
+                    meta.meta_type,
+                    Kind::Application | Kind::Patch | Kind::AddOnContent
+                ) {
+                    unsupported.push(format!("package-{i} contains {:?} metadata; this importer requires complete program and AddOnContent views, and cannot compose DLC data patches", meta.meta_type));
+                }
                 metas.push((i, meta));
             }
         }
@@ -56,13 +63,24 @@ pub fn generate_nup_mapping(
             "cannot generate mapping: no embedded meta/*.cnmt; use a reviewed manual mapping",
         ));
     }
-    let app = metas[0].1.application_id;
-    let marker = metas[0].1.platform_byte;
-    if metas
+    if !programs.iter().flatten().any(|(id, _)| *id as u8 == 0) {
+        unsupported.push("No primary executable (native program index 0) is present in the package table; an auxiliary program cannot be relabelled as the main game".into());
+    }
+    if !unsupported.is_empty() {
+        return Err(bad(&format!("Cannot generate mapping: {}. Re-export complete program/DLC views with their original metadata, including the main executable; retry generation on that export.", unsupported.join(". "))));
+    }
+    let executable_metas: Vec<_> = metas
+        .iter()
+        .filter(|(_, m)| matches!(m.meta_type, Kind::Application | Kind::Patch))
+        .collect();
+    let (_, first) = executable_metas.first().ok_or_else(|| bad("Cannot generate mapping: no executable Application/Patch CNMT. Re-export the program views with their original meta/ metadata, or use a reviewed manual mapping."))?;
+    let app = first.application_id;
+    let marker = first.platform_byte;
+    if executable_metas
         .iter()
         .any(|(_, m)| m.application_id != app || m.platform_byte != marker)
     {
-        let pairs: BTreeSet<_> = metas
+        let pairs: BTreeSet<_> = executable_metas
             .iter()
             .map(|(_, m)| (m.application_id, m.platform_byte))
             .collect();
@@ -72,13 +90,28 @@ pub fn generate_nup_mapping(
             .map(|(a, p)| format!("{a:016x}/platform-{p}"))
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(bad(&format!("cannot generate mapping: conflicting CNMT applications/platforms ({details}). Automatic mapping requires one consistent application and platform; a mapping cannot override this conflict")));
+        return Err(bad(&format!("cannot generate mapping: conflicting executable CNMT applications/platforms ({details}). Re-export a coherent program set with its original metadata; a mapping cannot override executable identity conflicts")));
     }
     let platform = match marker {
         0 => "switch1",
         1 => "switch2",
         _ => return Err(bad("unsupported CNMT platform")),
     };
+    for (i, meta) in &metas {
+        if meta.application_id != app
+            || !cnmt_platform_matches(
+                meta,
+                if marker == 1 {
+                    Platform::Switch2
+                } else {
+                    Platform::Switch1
+                },
+                marker == 1,
+            )
+        {
+            return Err(bad(&format!("package-{i}: DLC metadata belongs to a different application or incompatible platform. Re-export matching content for application {app:016x}; do not edit its IDs or platform markers")));
+        }
+    }
     let mut selected = Vec::new();
     for (i, p) in toc.packages.iter().enumerate() {
         let matching = |m: &crate::native::ContentMeta| match programs[i] {

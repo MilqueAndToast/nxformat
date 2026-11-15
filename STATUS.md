@@ -69,3 +69,29 @@ remains separate. See [TESTING.md](TESTING.md) for exact scope.
 ## Release 1.0.3.1 — 2026-11-14
 
 Full release of the upstream 1.0.3 merge, multi-program NUP compatibility, and checked GUI/CLI mapping generation. Includes the verified implementation through `fc9bc2c`. Latest validation: 270 packer tests and 13 GUI tests passed (one intentionally ignored packer test); the packaged CLI generated the XCDE mapping. The preceding compatibility implementation verified all 37,718 XCDE source files after conversion. No additional full real conversion or gameplay claim is made for the generation change.
+
+## Spec warnings and error feedback — 2026-11-14
+
+Unreleased changes add a per-file preflight before generating or loading a mapping.
+Detected NUP-v1 violations are shown with Cancel as the default and explicit
+Continue in compatibility mode. Existing mappings cannot bypass review; a changed
+TOC invalidates the acknowledgment. CLI mapping generation, mapped conversion
+and comparison require --allow-nonconforming-nup after reporting violations.
+Consent does not override missing required content, unsupported composition,
+identity conflicts, integrity failures or NX output requirements. Strict defaults
+remain intact.
+
+Corrected the legacy-DLC case by deriving application execution platform from
+executable CNMT, retaining matching older nonexecutable DLC with its native bytes
+and marker unchanged. A real source converted to four snapshots, passed strict NX
+verification and full comparison of 180 source files. The original multiple-BASE
+source is nonconforming NUP v1; explicit compatibility is not a conformance claim.
+A second source remains blocked by missing main executable and unimplemented
+DataPatch composition, rather than the previously reported identity conflict.
+
+Generation/load/save/worker failures now remain visible on the affected source
+card with a filename, explanation and next step. 274 packer tests passed (one
+ignored), plus 14 GUI tests. Native picker verification was blocked by invalid
+computer-use window geometry; automated behavior is tested. No gameplay claim.
+See TESTING.md and docs/NUP-COMPATIBILITY.md for precise evidence and rules.
+Changes are local pending PM review; no source push or release is authorized yet.

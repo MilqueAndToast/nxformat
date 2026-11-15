@@ -1,5 +1,42 @@
 # Local-decryption validation
 
+## Spec warnings and compatibility corrections — 2026-11-14
+
+This unreleased follow-up supersedes the earlier blanket mixed-platform refusal.
+One real multi-program source converted to NX with both native executables and
+two separate DLC snapshots, including legacy-platform AddOnContent owned by the
+same application. Input: 15,657,028,673 bytes; NX: 15,379,680,788 bytes. Strict NX
+verification passed. Mapped source comparison passed all 180 source files,
+146 distinct NX file readbacks (15,679,341,355 logical bytes), and one NACP.
+Source bytes were opened read-only; original CNMT platform markers are preserved.
+Completeness is declared; no gameplay, executable selection or DLC access test
+was performed. This demonstrates NX structure/integrity, not NUP-v1 conformance:
+the original has multiple BASE records and noncanonical extra roots. The
+[compatibility guide](docs/NUP-COMPATIBILITY.md) cites the applicable rules.
+
+A second real source has only an auxiliary executable in its package table and
+contains native DataPatch metadata. That is unsupported patch composition and
+a missing main-program blocker for this workflow, not proof of corrupt or
+unrelated DLC. The previous parser's generic application fallback for DataPatch
+was not valid ownership evidence. The generator now reports these actual
+blockers rather than a misleading application/platform conflict. It neither
+drops patches nor relabels the auxiliary executable.
+
+All 274 packer tests passed (one intentionally ignored) and all 14 GUI tests
+passed. Coverage includes legacy DLC conversion/source comparison; unrelated,
+unsupported or executable platform conflicts; file-specific visible errors;
+save-dialog cancellation/unavailability; invalid mapping loads; lost workers;
+warning-before-generation; Cancel; stale TOC acknowledgment; existing-mapping
+bypass rejection; CLI acknowledgment for generation/conversion/checking; and
+TOC corruption remaining fatal with consent. Formatting and whitespace checks
+passed. Windows build and final CLI smoke results are recorded locally.
+
+Manual native picker verification was blocked by the computer-use helper's
+invalid window geometry. UI input was stopped, the test app was closed and the
+computer-use session was explicitly ended. Visible-card behavior is covered by
+automated application-state tests; no manual picker/visual pass is claimed.
+Private evidence remains under ignored `results/multi-program-nup/`.
+
 ## Multi-program NUP compatibility — 2026-11-14
 
 ### Mapping generation follow-up
