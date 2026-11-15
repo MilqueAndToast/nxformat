@@ -5,7 +5,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/fab918/nxformat" height="20" align="top"></a>
   <a href="https://github.com/fab918/nxformat/actions/workflows/ci.yml"><img alt="Upstream tests and conformance" src="https://github.com/fab918/nxformat/actions/workflows/ci.yml/badge.svg?branch=main" height="20" align="top"></a>
-  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.3-local-decryption.2"><img alt="Local Decryption 1.0.3.2" src="https://img.shields.io/badge/release-1.0.3.2-blue" height="20" align="top"></a>
+  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.3-local-decryption.3"><img alt="Local Decryption 1.0.3.3" src="https://img.shields.io/badge/release-1.0.3.3-blue" height="20" align="top"></a>
   <img alt="Switch 1 and Switch 2" src="https://img.shields.io/badge/Switch-1%20%26%202-337ab7" height="20" align="top">
   <img alt="C++17 reader" src="https://img.shields.io/badge/reader-C%2B%2B17-00599C" height="20" align="top">
 </p>
@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.3-local-decryption.2"><strong>Download NXConvert — Local Decryption 1.0.3.2</strong></a>
+  <a href="https://github.com/MilqueAndToast/nxformat/releases/tag/v1.0.3-local-decryption.3"><strong>Download NXConvert — Local Decryption 1.0.3.3</strong></a>
   &nbsp;·&nbsp;
   <a href="#performance-nx-vs-nup">NX vs NUP</a>
   &nbsp;·&nbsp;
@@ -43,7 +43,7 @@ Fork of [fab918/nxformat](https://github.com/fab918/nxformat). Credit to its aut
 ## Added in this fork
 
 - **Local decryption:** load `prod.keys` and optional `title.keys` in the GUI or CLI to convert supported encrypted NSP/XCI files directly, with matching updates and DLC.
-- **DLC DataPatch updates (source build):** convert complete materialized NUP views and complete native Data NCAs, preserving target IDs and version requirements. Base-dependent raw patches remain unsupported. [Scope](docs/DATAPATCH.md).
+- **DLC DataPatch updates:** convert complete materialized NUP views and complete native Data NCAs, preserving target IDs and version requirements. Base-dependent raw patches remain unsupported. [Scope](docs/DATAPATCH.md).
 - **Sparse NCA3:** stream mapped content and generate missing regions as zeros, without a full decrypted temporary package. Missing game data still requires its matching update.
 - **Multi-program NUP:** generate or load a TOC-bound mapping in the GUI or CLI to retain native primary/auxiliary programs, matching updates and separate DLC. Generation requires consistent embedded metadata. [Usage and limits](docs/NUP-COMPATIBILITY.md).
 
@@ -56,7 +56,7 @@ Originals remain intact. With decryption enabled, recipes default off; enabled r
 | NCA3 NSP/XCI, CTR and CTR-EX decryption | Tested with real game dumps |
 | Sparse NCA3 and skip-hash modes | Synthetic tests only; sparse base/update conversion, strict NX verification and recipe replay pass. Real sparse games remain untested |
 | Explicit multi-program NUP mapping | Synthetic cases and real multi-program conversions, strict verification and source-file comparison passed; gameplay untested |
-| Complete DataPatch DLC updates (source build) | Synthetic materialized/native conversion, decryption, extraction and recipe/restoration checks; real conversions untested |
+| Complete DataPatch DLC updates | Synthetic materialized/native conversion, decryption, extraction and recipe/restoration checks; real conversions untested |
 | Encrypted Switch 2, NCA0/NCA2, XTS content sections, NCZ/NSZ/XCZ | Unsupported |
 | Emulator gameplay; this fork on Linux/macOS | Untested |
 
@@ -64,8 +64,8 @@ Sparse limits: 1,000,000 mappings and 64 MiB of table data per section. Already-
 
 ## Quick start
 
-**The current source includes upstream NXConvert 1.0.3** and writes NX archives with separate header pages. The existing NX wire formats are unchanged. Local Decryption 1.0.3.2 adds NUP compatibility warnings, support for additional compatible layouts, and clearer mapping errors.
-Download [Local Decryption 1.0.3.2 for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/download/v1.0.3-local-decryption.2/NXConvert-Local-Decryption-1.0.3.2-Windows-x64.zip)
+**The current source includes upstream NXConvert 1.0.3** and writes NX archives with separate header pages. The existing NX wire formats are unchanged. Local Decryption 1.0.3.3 adds support for complete DataPatch DLC updates, fixes multi-program DLC dependencies, and clarifies launch-program errors.
+Download [Local Decryption 1.0.3.3 for Windows x64](https://github.com/MilqueAndToast/nxformat/releases/download/v1.0.3-local-decryption.3/NXConvert-Local-Decryption-1.0.3.3-Windows-x64.zip)
 from [this fork's releases](https://github.com/MilqueAndToast/nxformat/releases),
 or build from source below. Current fork releases include the Windows app and source only.
 
