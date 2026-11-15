@@ -61,6 +61,14 @@ multiple edition controls are preserved but not guessed between (display falls
 back to package metadata). Generation validates the mapping before saving it.
 This does not repair conflicting CNMTs or establish game completeness.
 
+Source builds also support a narrow native-control fallback for one executable:
+the selected NACP TLV must match its original control file, and its initial
+program index, program index, accessibility flags, application and platform must
+agree with the actual NPDM and native CNMT markers. This can select a nonzero
+launch program and the corresponding `Acd_*` control without renaming IDs or
+guessing from package order. Conflicting or absent targets reject. Field layout:
+[libnx NACP](https://github.com/switchbrew/libnx/blob/master/nx/include/switch/nacp.h).
+
 Automatic generation uses executable Application/Patch CNMT for platform. A
 reviewed explicit mapping can also bind its declared application platform to a
 validated DataPatch marker when executable CNMT is unavailable; launch role and
@@ -70,9 +78,9 @@ and DLC title/version match and it has no executable content. Its original
 platform marker and bytes remain preserved. Executable platform conflicts,
 unrelated DLC and newer-platform DLC attached to older-platform programs still
 fail validation. Absence of program index zero does not prove missing game data:
-this generator cannot infer its launch role, so use a reviewed explicit mapping
-naming an existing native launch Program. Complete materialized DataPatch views are now
-supported in source builds; raw base-dependent patch reconstruction remains
+generation requires validated launch metadata or a reviewed explicit mapping
+naming an existing native launch Program. Complete materialized DataPatch views are
+supported; raw base-dependent patch reconstruction remains
 unsupported. [DataPatch scope](DATAPATCH.md).
 
 This representation uses the existing [NX catalog rules](SPEC.md#4-fast-catalog):
@@ -110,6 +118,19 @@ Ordinary DLC retains its source title/version and has no executable Program.
 DataPatch uses its native target DataId and patch version; differing NUP version
 labels are reported by preflight and retained in provenance. A nonzero required
 application version needs a `requires` dependency on a matching primary snapshot.
+
+When executable CNMT is absent, a stored package version is retained as a source
+value, not treated as a proven native application version. A missing authoritative
+version differs from a known version of zero. Source builds retain DLC minimums
+as **unresolved** rather than invent a satisfying version or dependency. Review
+the per-file GUI warning before continuing, or explicitly pass
+`--allow-unresolved-nup-requirements` to `map-nup`, mapped `pack-nup` and
+`check-nup`. This acknowledgment is separate from NUP conformance consent and is
+required even with an existing mapping. Known native version conflicts still
+reject. User-supplied dependency/version declarations cannot bypass these checks.
+Runtime compatibility remains unverified. Raw CNMT stays intact, and structured
+`unresolved-requirement` rows (package index, CNMT title, application, minimum,
+reason) persist in every `data/__nup_mapping__.txt` alongside original labels.
 
 Optional `nacp` and `icon` records select original `control/` paths, including
 subdirectories. For example, `nacp<TAB>main<TAB>control/Acd_1/control.nacp`

@@ -123,3 +123,22 @@ explicit mapping instead reaches an unmet DLC requirement: application version
 establish another version. Conversion remains blocked pending version evidence;
 no source content or version is fabricated or dropped. Existing NUP spec
 warnings and opt-in remain mandatory. No source push or release authorized yet.
+
+## NUP native launch and unknown application versions — 2026-11-15
+
+This supersedes the earlier interpretation of absent executable CNMT as a known
+version-zero conflict. A selected native NACP can identify a nonzero launch
+program when its original control bytes, indices, accessible flags, application
+and platform agree with the actual NPDM and CNMT markers. The narrow generator
+fallback preserves source numeric values and uses no title-specific choices.
+
+Complete materialized NUP views can retain DLC minimums as unresolved when the
+authoritative native application version is absent. A separate per-file warning
+and explicit acknowledgment are mandatory, including existing-map paths. Raw
+CNMT and structured unresolved requirements remain inside NX; no satisfying
+version or exact dependency is invented. Known native version conflicts, false
+links, incoherent identities, missing required content and corruption still
+reject. Native raw-content behavior is unchanged. No NX wire-format change.
+
+284 packer tests passed (one ignored), plus 16 GUI tests; see TESTING.md. These
+changes remain local pending real-source validation and PM publication review.

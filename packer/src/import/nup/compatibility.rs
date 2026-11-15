@@ -36,6 +36,7 @@ pub(super) struct Mapping {
     pub manifest: DeclarationManifest,
     pub indices: Vec<usize>,
     pub trees: Vec<Tree>,
+    unresolved_requirements: BTreeSet<(usize, u64, u64, u32)>,
 }
 
 pub(super) fn small_file(
@@ -137,6 +138,10 @@ impl Mapping {
                 p.title_id, p.kind, p.flags, p.version
             ));
         }
+        text.push_str("\nUnresolved native requirements (version 1; package, CNMT title, application, minimum version, reason):\n");
+        for (package, title, app, minimum) in &self.unresolved_requirements {
+            text.push_str(&format!("unresolved-requirement\t{package}\t{title:016x}\t{app:016x}\t{minimum}\tunknown-authoritative-application-version\n"));
+        }
         text.push_str("\nDeclarations:\n");
         text.push_str(std::str::from_utf8(self.manifest.bytes()).unwrap());
         text
@@ -193,6 +198,7 @@ impl Mapping {
         let first = &manifest.snapshots[0];
         let mut cnmts = Vec::new();
         let mut metadata_bytes = 0u64;
+        let mut unresolved_requirements = BTreeSet::new();
         for s in &manifest.snapshots {
             cancelled(token)?;
             portable_path(&format!("trees/{}", s.key), limits)?;
@@ -335,6 +341,22 @@ impl Mapping {
             }
             indices.push(i);
             trees.push(tree);
+        }
+        for (s, index) in manifest.snapshots.iter().zip(&indices) {
+            if s.snapshot_type != SnapshotType::Dlc
+                && s.numeric_version != toc.packages[*index].version
+                && !cnmts.iter().any(|m| {
+                    m.application_id == s.application_id
+                        && m.version == s.numeric_version
+                        && matches!(
+                            m.meta_type,
+                            crate::native::ContentMetaType::Application
+                                | crate::native::ContentMetaType::Patch
+                        )
+                })
+            {
+                return Err(bad("without native executable CNMT, preserve the source package numeric version; do not infer it from display text or DLC minimums"));
+            }
         }
         // One stable role per native Program ID; at most one primary program.
         let mut roles = BTreeMap::new();
@@ -495,11 +517,43 @@ impl Mapping {
                     && meta.required_application_version.unwrap_or(0) > 0
                 {
                     let minimum = meta.required_application_version.unwrap();
-                    if !s.dependencies.iter().any(|(_, key)| {
+                    let known = cnmts.iter().any(|m| {
+                        m.application_id == s.application_id
+                            && matches!(
+                                m.meta_type,
+                                crate::native::ContentMetaType::Application
+                                    | crate::native::ContentMetaType::Patch
+                            )
+                    });
+                    if !known {
+                        if !s.dependencies.is_empty() {
+                            return Err(bad("DLC minimum application version is unresolved; an explicit dependency cannot assert an unknown authoritative version"));
+                        }
+                        let position = manifest
+                            .snapshots
+                            .iter()
+                            .position(|d| d.key == s.key)
+                            .unwrap();
+                        unresolved_requirements.insert((
+                            indices[position],
+                            meta.title_id,
+                            meta.application_id,
+                            minimum,
+                        ));
+                    } else if !s.dependencies.iter().any(|(_, key)| {
                         manifest.snapshots.iter().any(|d| {
                             &d.key == key
                                 && d.program_kind == ProgramKind::Primary
                                 && d.numeric_version >= minimum
+                                && cnmts.iter().any(|m| {
+                                    m.application_id == d.application_id
+                                        && m.version == d.numeric_version
+                                        && matches!(
+                                            m.meta_type,
+                                            crate::native::ContentMetaType::Application
+                                                | crate::native::ContentMetaType::Patch
+                                        )
+                                })
                         })
                     }) {
                         return Err(bad(&format!(
@@ -531,6 +585,7 @@ impl Mapping {
             manifest,
             indices,
             trees,
+            unresolved_requirements,
         })
     }
 }

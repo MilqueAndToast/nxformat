@@ -6,6 +6,8 @@ use super::*;
 pub struct NupPreflight {
     pub toc_sha256: [u8; 32],
     pub violations: Vec<String>,
+    /// Runtime requirements retained in CNMT but not proven by available versions.
+    pub unresolved_requirements: Vec<String>,
 }
 
 pub fn inspect_nup_spec(
@@ -27,6 +29,7 @@ pub fn inspect_nup_spec(
     }
     let mut entries = 0;
     let mut metadata_bytes = 0u64;
+    let mut metas = Vec::new();
     for (i, p) in toc.packages.iter().enumerate() {
         cancelled(token)?;
         if p.kind > 2 || p.flags > 1 || (p.kind != 1 && p.flags != 0) {
@@ -76,11 +79,17 @@ pub fn inspect_nup_spec(
                 {
                     violations.push(format!("package-{i} declares version {} but its native CNMT records version {}; NUP v1 §3.1.1 requires the original numeric content version.",p.version,meta.version));
                 }
+                metas.push(meta);
             }
         }
     }
     Ok(NupPreflight {
         toc_sha256: toc.digest,
         violations,
+        unresolved_requirements: metas.iter().filter(|m| {
+            matches!(m.meta_type, crate::native::ContentMetaType::AddOnContent | crate::native::ContentMetaType::DataPatch)
+                && m.required_application_version.unwrap_or(0) > 0
+                && !metas.iter().any(|p| p.application_id == m.application_id && matches!(p.meta_type, crate::native::ContentMetaType::Application | crate::native::ContentMetaType::Patch))
+        }).map(|m| format!("DLC {:016x} requires application {:016x} version {} or newer. No authoritative executable CNMT version is available; the stored package version is preserved, and this requirement remains UNRESOLVED. Conversion does not establish runtime compatibility.",m.title_id,m.application_id,m.required_application_version.unwrap())).collect(),
     })
 }

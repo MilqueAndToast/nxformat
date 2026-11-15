@@ -46,6 +46,7 @@ Fork of [fab918/nxformat](https://github.com/fab918/nxformat). Credit to its aut
 - **DLC DataPatch updates:** convert complete materialized NUP views and complete native Data NCAs, preserving target IDs and version requirements. Base-dependent raw patches remain unsupported. [Scope](docs/DATAPATCH.md).
 - **Sparse NCA3:** stream mapped content and generate missing regions as zeros, without a full decrypted temporary package. Missing game data still requires its matching update.
 - **Multi-program NUP:** generate or load a TOC-bound mapping in the GUI or CLI to retain native primary/auxiliary programs, matching updates and separate DLC. Generation requires consistent embedded metadata. [Usage and limits](docs/NUP-COMPATIBILITY.md).
+- **NUP launch and version handling (source build):** use validated native launch metadata for supported nonzero-index programs. Missing native application versions and DLC minimums stay explicitly unresolved, with a separate warning and opt-in; known conflicts still reject.
 
 Originals remain intact. With decryption enabled, recipes default off; enabled recipes rebuild decrypted bytes. [Usage and key requirements](LOCAL-DECRYPTION.md).
 

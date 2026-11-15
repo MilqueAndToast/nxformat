@@ -1,5 +1,24 @@
 # Local-decryption validation
 
+## Native NUP launch selection and unknown versions — 2026-11-15
+
+Source builds distinguish an unknown authoritative application version from a
+known native version of zero. Original package numeric values and raw DLC CNMT
+minimums remain intact. Unresolved requirements are persisted as structured
+`unresolved-requirement` provenance inside NX; conversion requires a per-file GUI
+review or `--allow-unresolved-nup-requirements` in addition to any NUP conformance
+consent. No satisfying version or exact dependency identity is fabricated.
+
+284 packer tests passed (one intentionally ignored), plus 16 GUI tests. Added
+coverage checks selected native NACP/TLV/control agreement, nonzero launch and
+actual NPDM identity, absent accessibility/targets and conflicting controls;
+unknown, known-zero, too-old and satisfying application versions; unchanged
+source bytes; strict verification, full source comparison and extracted
+unresolved provenance. Existing-map CLI and GUI paths require fresh explicit
+review and carry acknowledgment into conversion. False dependency links and
+display-derived/source-version overrides reject. Native raw-content behavior,
+partial patch refusal and integrity requirements remain unchanged.
+
 ## DataPatch support — 2026-11-15
 
 Unreleased source adds the [documented complete-view subset](docs/DATAPATCH.md).

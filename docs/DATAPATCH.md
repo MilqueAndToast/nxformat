@@ -24,8 +24,12 @@ Conversion checks application/target identity, Data content, any supplied
 forward link and minimum application version. Native Data NCA ownership must
 match either explicitly declared DataId or patch title; unrelated owners fail.
 The target DLC always comes from CNMT DataId, including extracted folder/import
-declarations. A matching supplied application snapshot satisfies required-version
-dependencies through its exact identity. Incomplete raw patches are never
+declarations. A matching, authoritative application snapshot satisfies required-version
+dependencies through its exact identity. Source builds retain unknown native
+application versions and DLC minimums as unresolved, requiring a separate warning
+and explicit acknowledgment for materialized NUPs; known version conflicts still
+reject. See [NUP requirements](NUP-COMPATIBILITY.md#mapping-format-and-checks).
+Incomplete raw patches are never
 overlaid by guessing filenames or filling missing bytes.
 
 Complete materialized views do not inherit files from the old DLC: this preserves
@@ -34,8 +38,8 @@ the same DataId/version, this mapping cannot represent them unambiguously and
 rejects the source. It never silently drops either package. A complete standalone
 DLC view may be converted without its old version; completeness remains a caller
 declaration. Automatic launch-role inference remains separate from DataPatch
-support. A nonzero program index can be the launch program; its role must be
-explicitly declared from evidence rather than inferred as missing or renamed.
+support. A nonzero program index can be the launch program; its role must follow
+validated native launch metadata or an explicit reviewed declaration.
 
 Native filesystem extraction retains its existing single-Data-NCA limit; raw NCA
 export preserves stored multi-Data views. With an application supplied, required

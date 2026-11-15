@@ -1112,7 +1112,12 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical().max_height(220.0).show(ui,|ui| { for violation in &review.preflight.violations { ui.label(violation); } });
                     ui.label("Compatibility preserves supported contents in NX; it does not repair NUP conformance. Your consent cannot override unsupported content, identity conflicts, missing required content or integrity failures.");
                 } else { ui.label("No representational NUP v1 violations detected. Content and identity checks still apply."); }
-                ui.label("Automatic generation uses program index 0 by convention. Explicit mappings can declare another validated native launch program. Missing or conflicting relationship evidence stops generation.");
+                if !review.preflight.unresolved_requirements.is_empty() {
+                    ui.colored_label(ui.visuals().warn_fg_color,"Unresolved native runtime requirements:");
+                    egui::ScrollArea::vertical().id_salt("nup-runtime-requirements").max_height(180.0).show(ui,|ui| { for warning in &review.preflight.unresolved_requirements { ui.label(warning); } });
+                    ui.label("Continuing preserves these requirements as unresolved. It does not establish a satisfying application version or runtime compatibility.");
+                }
+                ui.label("Automatic generation can use validated native launch metadata, including a nonzero program index; otherwise it uses the documented index-zero convention. Missing or conflicting relationship evidence stops generation.");
                 ui.label("Continuing declares that the stored program trees are complete. Metadata cannot prove this or guarantee the game will boot. Your source stays unchanged.");
                 ui.horizontal(|ui| {
                     let cancel=ui.button("Cancel");

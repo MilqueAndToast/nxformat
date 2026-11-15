@@ -1114,3 +1114,241 @@ fn explicit_nonzero_launch_program_is_primary_without_rewriting_its_id() {
     );
     assert_eq!(fs::read(source).unwrap(), bytes);
 }
+
+fn selected_launch_fixture(known_version: Option<u32>, defect: u8) -> Vec<u8> {
+    let mut selected = nacp(&[(0, "Selected edition")]);
+    selected[0x3070..0x3078].copy_from_slice(&(APP + 0x1000).to_le_bytes());
+    selected[0x3212] = 1;
+    selected[0x3216] = 1;
+    selected[0x3217] = 1;
+    selected[0x34d1] = 1;
+    selected[0x34d4..0x34d8].copy_from_slice(&2u32.to_le_bytes());
+    match defect {
+        1 => selected[0x34d4] = 0,
+        2 => selected[0x34d1] = 2,
+        3 => selected[0x3212] = 0,
+        4 => selected[0x3070..0x3078].copy_from_slice(&(APP + 0x2000).to_le_bytes()),
+        _ => {}
+    }
+    let mut original = selected.clone();
+    if defect == 5 {
+        original[0x3060] = b'9';
+    }
+    let mut root = selected.clone();
+    root[0x3216] = 0;
+    root[0x3217] = 0;
+    root[0x34d1] = 0;
+    root[0x34d4] = 1;
+    let mut program = base(AUX);
+    program.meta = if defect == 6 {
+        vec![]
+    } else {
+        vec![(2, selected)]
+    };
+    let mut program_extras = vec![Node::Dir(
+        "control",
+        vec![
+            Node::File("control.nacp", root),
+            Node::Dir("Acd_1", vec![Node::File("control.nacp", original)]),
+        ],
+    )];
+    if let Some(version) = known_version {
+        let mut meta = vec![0u8; 0x30 + 0x38];
+        meta[..8].copy_from_slice(&APP.to_le_bytes());
+        meta[8..12].copy_from_slice(&version.to_le_bytes());
+        meta[0xc] = 0x80;
+        meta[0xd] = 1;
+        meta[0xe] = 0x10;
+        meta[0x10] = 1;
+        meta[0x20..0x28].copy_from_slice(&(APP + 0x800).to_le_bytes());
+        meta[0x30 + 0x36] = 1;
+        meta[0x30 + 0x37] = 1;
+        program_extras.push(Node::Dir(
+            "meta",
+            vec![Node::File("Application.cnmt", meta)],
+        ));
+    }
+    build_with_extras(
+        &[program, addon(APP)],
+        true,
+        &[
+            (0, program_extras),
+            (
+                1,
+                vec![Node::Dir(
+                    "meta",
+                    vec![Node::File(
+                        "DataPatch.cnmt",
+                        data_patch_cnmt(APP + 0x1001, APP + 0x1801, 7, 5),
+                    )],
+                )],
+            ),
+        ],
+    )
+}
+
+#[test]
+fn selected_nacp_launch_preserves_unknown_versions_and_rejects_known_conflicts() {
+    let dir = work("selected-nacp-version");
+    let source = dir.join("source.nup");
+    let map = dir.join("source.nxnupmap");
+    let limits = ImportLimits::default();
+    let token = crate::CancellationToken::default();
+    for known in [None, Some(0), Some(2), Some(10)] {
+        let bytes = selected_launch_fixture(known, 0);
+        fs::write(&source, &bytes).unwrap();
+        let preflight = inspect_nup_spec(&source, &limits, &token).unwrap();
+        assert_eq!(
+            !preflight.unresolved_requirements.is_empty(),
+            known.is_none()
+        );
+        let generated = generate_nup_mapping(&source, &limits, &token);
+        if matches!(known, Some(0 | 2)) {
+            assert!(generated
+                .unwrap_err()
+                .to_string()
+                .contains("authoritative executable CNMT"));
+            continue;
+        }
+        let text = generated.unwrap();
+        assert!(text.contains("nacp\tpkg-0\tcontrol/Acd_1/control.nacp"));
+        assert!(text.contains(&format!(
+            "{AUX:016x}\tprimary\tbase\t{}\tcomplete",
+            known.unwrap_or(0)
+        )));
+        assert_eq!(
+            text.contains("dependency\tpkg-1\trequires\tpkg-0"),
+            known.is_some()
+        );
+        fs::write(&map, &text).unwrap();
+        let output = dir.join(format!("{known:?}.nx"));
+        convert_nup(
+            &source,
+            &output,
+            &NupOptions {
+                mapping: Some(map.clone()),
+                platform: Some(Platform::Switch2),
+                stream: true,
+                ..Default::default()
+            },
+            &limits,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        crate::inspect_archive(
+            &output,
+            &WriterOptions::default(),
+            crate::IntegrityPolicy::Strict,
+        )
+        .unwrap();
+        check_nup_with_mapping(
+            &source,
+            &output,
+            false,
+            &map,
+            &limits,
+            &WriterOptions::default(),
+        )
+        .unwrap();
+        let mut f = File::open(&source).unwrap();
+        let (toc, _) = read_toc(&mut f, &limits).unwrap();
+        let parsed = Mapping::read(&map, &source, &toc, &limits, &token).unwrap();
+        let provenance = parsed.provenance(&toc);
+        assert_eq!(
+            provenance.contains("unresolved-requirement\t1\t"),
+            known.is_none()
+        );
+        if known.is_none() {
+            assert!(provenance.contains("\t5\tunknown-authoritative-application-version"));
+            assert_eq!(parsed.unresolved_requirements.len(), 1);
+            let forged = text.replace("primary\tbase\t0\t", "primary\tbase\t10\t");
+            fs::write(&map, forged).unwrap();
+            assert!(inspect_nup_with_mapping(&source, &map, &limits, &token).is_err());
+            fs::write(&map, format!("{text}dependency\tpkg-1\trequires\tpkg-0\n")).unwrap();
+            assert!(inspect_nup_with_mapping(&source, &map, &limits, &token)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cannot assert an unknown"));
+        }
+        assert_eq!(fs::read(&source).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn selected_nacp_launch_rejects_conflicts_missing_access_and_missing_target() {
+    let dir = work("selected-nacp-conflict");
+    let source = dir.join("source.nup");
+    for defect in 1..=6 {
+        fs::write(&source, selected_launch_fixture(None, defect)).unwrap();
+        assert!(
+            generate_nup_mapping(
+                &source,
+                &ImportLimits::default(),
+                &crate::CancellationToken::default()
+            )
+            .is_err(),
+            "defect {defect}"
+        );
+    }
+}
+
+#[test]
+fn unresolved_requirements_need_fresh_cli_opt_in_even_for_an_existing_map() {
+    let dir = work("unresolved-requirement-consent");
+    let source = dir.join("source.nup");
+    let map = dir.join("source.nxnupmap");
+    let output = dir.join("out.nx");
+    fs::write(&source, selected_launch_fixture(None, 0)).unwrap();
+    let text = generate_nup_mapping(
+        &source,
+        &ImportLimits::default(),
+        &crate::CancellationToken::default(),
+    )
+    .unwrap();
+    fs::write(&map, text).unwrap();
+    let mut args = vec![
+        "pack-nup".into(),
+        source.to_string_lossy().into_owned(),
+        output.to_string_lossy().into_owned(),
+        "--platform".into(),
+        "switch2".into(),
+        "--nup-map".into(),
+        map.to_string_lossy().into_owned(),
+        "--allow-nonconforming-nup".into(),
+    ];
+    let error = crate::cli::run(args.clone(), None, None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("--allow-unresolved-nup-requirements"));
+    assert!(!output.exists());
+    args.push("--allow-unresolved-nup-requirements".into());
+    crate::cli::run(args, None, None).unwrap();
+    let extracted = dir.join("extracted");
+    crate::cli::run(
+        vec![
+            "extract".into(),
+            output.to_string_lossy().into_owned(),
+            extracted.to_string_lossy().into_owned(),
+            "--no-restore".into(),
+        ],
+        None,
+        None,
+    )
+    .unwrap();
+    let mut retained = false;
+    fn visit(path: &Path, retained: &mut bool) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(&path, retained);
+            } else if path.file_name().unwrap() == "__nup_mapping__.txt" {
+                let text = fs::read_to_string(path).unwrap();
+                assert!(text.contains("unresolved-requirement\t1\t"));
+                *retained = true;
+            }
+        }
+    }
+    visit(&extracted, &mut retained);
+    assert!(retained);
+}

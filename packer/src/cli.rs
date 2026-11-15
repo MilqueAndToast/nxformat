@@ -142,6 +142,7 @@ nxconvert pack-tree PACKAGE MANIFEST OUTPUT.nx RECEIPT [--latest] [--dlc KEY]\n\
 nxconvert pack-nup INPUT.nup OUTPUT.nx --platform switch1|switch2 [--skip-dlc] [--nup-map FILE]\n\
 nxconvert map-nup INPUT.nup OUTPUT.nxnupmap --assume-complete (generate a checked compatibility mapping)\n\
 --allow-nonconforming-nup explicitly acknowledges the reported NUP-v1 violations for map-nup or pack-nup/check-nup with --nup-map; default rejects these inputs.\n\
+--allow-unresolved-nup-requirements acknowledges preserved, unresolved DLC minimum versions when authoritative executable CNMT is absent; does not establish runtime compatibility.\n\
 nxconvert check-nup INPUT.nup ARCHIVE.nx [--skip-dlc] [--nup-map FILE] (every NUP file is in the NX: paths, NACP, and bytes read back and hashed)\n\
 nxconvert pack SOURCE... OUTPUT.nx [--keys prod.keys] [--title-keys title.keys] [--no-recipe [--omit-firmware]]\n\
 --keys enables streaming NSP/XCI decryption; adjacent title.keys is loaded automatically. Recipes default OFF with keys; --recipe rebuilds decrypted bytes, not encrypted originals.\n\
@@ -191,6 +192,7 @@ struct Options {
     nup_mapping: Option<PathBuf>,
     assume_complete: bool,
     allow_nonconforming_nup: bool,
+    allow_unresolved_nup_requirements: bool,
     /// `--recipe` / `--no-recipe`; pack and add keep recipes unless told not to.
     recipe: Option<bool>,
     omit_firmware: bool,
@@ -222,6 +224,10 @@ fn parse(args: Vec<String>) -> Result<(Vec<String>, Options), Box<dyn std::error
         }
         if a == "--assume-complete" {
             o.assume_complete = true;
+            continue;
+        }
+        if a == "--allow-unresolved-nup-requirements" {
+            o.allow_unresolved_nup_requirements = true;
             continue;
         }
         if a == "--allow-nonconforming-nup" {
@@ -2405,8 +2411,9 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         c == "map-nup"
             || (matches!(c.as_str(), "pack-nup" | "check-nup") && o.nup_mapping.is_some())
     });
-    if o.allow_nonconforming_nup && !compatibility_command {
-        return Err("--allow-nonconforming-nup requires map-nup or pack-nup/check-nup with an explicit mapping".into());
+    if (o.allow_nonconforming_nup || o.allow_unresolved_nup_requirements) && !compatibility_command
+    {
+        return Err("NUP compatibility acknowledgment flags require map-nup or pack-nup/check-nup with an explicit mapping".into());
     }
     if compatibility_command {
         let input = args.get(1).ok_or_else(|| "missing NUP source")?;
@@ -2421,6 +2428,13 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!("{warning}\nReview these violations, then explicitly add --allow-nonconforming-nup to continue in compatibility mode.").into());
             }
             eprintln!("WARNING: {warning}\nExplicit compatibility acknowledgment received.");
+        }
+        if !preflight.unresolved_requirements.is_empty() {
+            let warning=format!("{} has unresolved native runtime requirements:\n{}\nThese requirements remain preserved in CNMT and structured archive provenance; no satisfying application version or exact dependency is invented.",input,preflight.unresolved_requirements.join("\n"));
+            if !o.allow_unresolved_nup_requirements {
+                return Err(format!("{warning}\nReview this warning, then explicitly add --allow-unresolved-nup-requirements to retain these requirements as unresolved.").into());
+            }
+            eprintln!("WARNING: {warning}\nUnresolved requirements explicitly acknowledged; runtime compatibility is unverified.");
         }
     }
     if args.first().map(String::as_str) == Some("map-nup") {
@@ -2444,7 +2458,7 @@ fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let _ = std::fs::remove_file(&args[2]);
             return Err(format!("Could not finish saving mapping {}: {error}. Choose a writable folder with enough free space and retry.",args[2]).into());
         }
-        println!("Generated TOC-bound mapping: {}. Program index zero is primary; other indices are auxiliary. Completeness is caller-declared; gameplay is untested. Review before conversion.", args[2]);
+        println!("Generated TOC-bound mapping: {}. Native launch metadata or the documented index-zero convention selects the primary program. Completeness is caller-declared; gameplay is untested. Review before conversion.", args[2]);
         return Ok(());
     }
     let mut limits = import::ImportLimits::default();

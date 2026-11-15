@@ -217,6 +217,7 @@ fn start(mut job: Job, ctx: &egui::Context) -> Running {
                 ];
                 if digest.is_some() {
                     command.push("--allow-nonconforming-nup".into());
+                    command.push("--allow-unresolved-nup-requirements".into());
                 }
                 cli::run(command, Some(sink), Some(token.clone()))
                     .map_err(|e| e.to_string())
@@ -323,6 +324,9 @@ fn check_mapping_acknowledgment(
     }
     if !preflight.violations.is_empty() {
         return Err(format!("This file does not conform to NUP v1: {} Review the per-file warning and choose Continue in compatibility mode first.",preflight.violations.join(" ")));
+    }
+    if !preflight.unresolved_requirements.is_empty() {
+        return Err(format!("Unresolved native runtime requirements: {} Review the per-file warning and explicitly continue first.",preflight.unresolved_requirements.join(" ")));
     }
     Ok(None)
 }
@@ -1064,6 +1068,101 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_nup_requirements_are_reviewed_and_acknowledged_in_conversion() {
+        use super::*;
+        use nxformat_packer::import::{
+            inspect_nup_spec,
+            synthetic_nup::{addon, base, build_with_extras, Node},
+            ImportLimits,
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "nxconvert-unresolved-review-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.nup");
+        let map = dir.join("source.nxnupmap");
+        let id = 0x0100_0000_1234_0000u64;
+        let mut meta = vec![0u8; 0x78];
+        meta[..8].copy_from_slice(&(id + 0x1801).to_le_bytes());
+        meta[0xc] = 0x84;
+        meta[0xd] = 1;
+        meta[0xe] = 0x20;
+        meta[0x10] = 1;
+        meta[0x76] = 2;
+        meta[0x20..0x28].copy_from_slice(&(id + 0x1001).to_le_bytes());
+        meta[0x28..0x30].copy_from_slice(&id.to_le_bytes());
+        meta[0x30..0x34].copy_from_slice(&5u32.to_le_bytes());
+        let bytes = build_with_extras(
+            &[base(id), addon(id)],
+            true,
+            &[(
+                1,
+                vec![Node::Dir("meta", vec![Node::File("DataPatch.cnmt", meta)])],
+            )],
+        );
+        std::fs::write(&source, &bytes).unwrap();
+        let digest = bytes[24..56]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        std::fs::write(&map,format!("NXNUPMAP\t1\t{digest}\nNXIMPORT\t1\nsnapshot\tlaunch\tpackage-0\tswitch2\t{id:016x}\t{id:016x}\tprimary\tbase\t0\tcomplete\tmaterialized-v1\tmeta-acid3072-v1\nsnapshot\tdlc\tpackage-1\tswitch2\t{id:016x}\t-\tnone\tdlc\t0\tcomplete\tmaterialized-v1\tnone\naddon\tdlc\t{:016x}\n",id+0x1001)).unwrap();
+        let token = CancellationToken::default();
+        let ctx = egui::Context::default();
+        let preflight = inspect_nup_spec(&source, &ImportLimits::for_nup(), &token).unwrap();
+        assert_eq!(preflight.unresolved_requirements.len(), 1);
+        assert!(preflight.unresolved_requirements[0].contains("UNRESOLVED"));
+        let mut args = vec!["scan-nup-map".into(), text(&source), text(&map)];
+        assert!(check_mapping_acknowledgment(&args, &token).is_err());
+        let mut app = App::default();
+        app.mapping_review = Some(MappingReview {
+            source: source.clone(),
+            mapping: Some(map.clone()),
+            preflight: preflight.clone(),
+        });
+        app.mapping_review_focus = true;
+        app.cancel_mapping_review();
+        assert!(app.sources.is_empty());
+        assert!(app.queue.is_empty());
+        args.push(mapping_digest(&preflight.toc_sha256));
+        let running = start(
+            Job {
+                label: "Reviewed mapping".into(),
+                args,
+                purpose: Purpose::Scan,
+                display: None,
+                metadata: None,
+                source_bytes: None,
+            },
+            &ctx,
+        );
+        loop {
+            match running
+                .rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .unwrap()
+            {
+                Message::Sources(sources) => app.sources = sources,
+                Message::Done(result) => {
+                    result.unwrap();
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(app.sources[0].supported);
+        assert!(app.sources[0].nup_acknowledged_toc.is_some());
+        app.convert();
+        let job = app.queue.pop_front().unwrap();
+        assert!(job
+            .args
+            .iter()
+            .any(|a| a == "--allow-unresolved-nup-requirements"));
+        cli::run(job.args, None, Some(token)).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn nup_discovery_uses_the_conversion_inventory_limits() {
         use super::{discovery, CancellationToken};
         use nxformat_packer::import::synthetic_nup::{base, build, Node};
@@ -1680,6 +1779,7 @@ impl App {
                     args.extend(["--nup-map".into(), text(mapping)]);
                     if selected[0].nup_acknowledged_toc.is_some() {
                         args.push("--allow-nonconforming-nup".into());
+                        args.push("--allow-unresolved-nup-requirements".into());
                     }
                 }
             }
