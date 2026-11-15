@@ -18,7 +18,7 @@ layout checks cover small viewports and multiple scales. The Windows build and
 native synthetic-source checks passed at default and minimum window sizes,
 including batch continuation, cancellation, scrolling actions and queue-only
 skip. Physical display-scale changes were not tested. See TESTING.md for
-validation evidence and limits. Publication is pending PM review.
+validation evidence and limits. Release 1.0.3.5 includes this GUI update.
 
 ## Earlier checkpoints
 
